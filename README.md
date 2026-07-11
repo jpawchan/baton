@@ -129,6 +129,7 @@ because `--bare` disables hooks.
 | `skill/` | Agent-skill metadata and usage guidance. |
 | `tests/test_relay.py` | End-to-end test suite. |
 | `SPEC.md` | Exact behavior and safety rules. |
+| `summary.md` | Code-verified project guide. |
 | `LICENSE` | MIT license text. |
 
 ## License

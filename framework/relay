@@ -1,0 +1,1789 @@
+#!/usr/bin/env python3
+"""Agent Relay: scoped coding-agent tasks with review before approval.
+
+Requires Python 3.11+, Git, and macOS or Linux.
+Run `relay <command> --help` for command details.
+"""
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from contextlib import contextmanager, suppress
+from datetime import datetime, timezone
+
+RELAY_DIRNAME = ".agent-relay"
+STATUSES = (
+    "queued", "running", "needs_review", "needs_decision",
+    "blocked", "failed", "done", "cancelled",
+)
+WORKER_FINAL = ("needs_review", "needs_decision", "blocked", "failed")
+TASK_ID_RE = re.compile(r"T\d{3,}-[a-z0-9]+(?:-[a-z0-9]+)*")
+PRINT_LOCK = threading.Lock()
+MANAGED_FILES = (
+    "relay", "orchestrator.md", "worker.md", "memory.md", "config.toml",
+)
+MANAGED_DIRS = ("tasks", "work", "archive", ".locks")
+
+if sys.version_info < (3, 11):
+    raise SystemExit("error: Agent Relay requires Python 3.11 or newer")
+
+
+class RunInterrupted(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+        super().__init__("run interrupted by signal {}".format(signum))
+
+
+def handle_run_signal(signum, _frame):
+    raise RunInterrupted(signum)
+
+
+def say(message=""):
+    with PRINT_LOCK:
+        print(message)
+
+
+def die(message):
+    print("error: " + message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Paths and durable writes
+
+def script_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def find_relay_dir():
+    env = os.environ.get("RELAY_DIR")
+    if env and os.path.isdir(env):
+        return os.path.abspath(env)
+    current = os.getcwd()
+    while True:
+        candidate = os.path.join(current, RELAY_DIRNAME)
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    if os.path.basename(script_dir()) == RELAY_DIRNAME:
+        return script_dir()
+    return None
+
+
+def runtime_paths_are_safe(relay_dir):
+    root = os.path.realpath(os.path.dirname(relay_dir))
+    if os.path.lexists(relay_dir):
+        if os.path.islink(relay_dir) or not os.path.isdir(relay_dir):
+            die(".agent-relay must be a real directory inside the project")
+        if os.path.commonpath((root, os.path.realpath(relay_dir))) != root:
+            die(".agent-relay resolves outside the project")
+    for name in MANAGED_FILES:
+        path = os.path.join(relay_dir, name)
+        if os.path.lexists(path) and (os.path.islink(path) or not os.path.isfile(path)):
+            die("managed runtime file is not a regular file: {}".format(path))
+    for name in MANAGED_DIRS:
+        path = os.path.join(relay_dir, name)
+        if os.path.lexists(path) and (os.path.islink(path) or not os.path.isdir(path)):
+            die("managed runtime path is not a real directory: {}".format(path))
+        if os.path.isdir(path):
+            for current, directories, files in os.walk(path, followlinks=False):
+                for entry in directories + files:
+                    nested = os.path.join(current, entry)
+                    if os.path.islink(nested):
+                        die("managed runtime paths cannot be symlinks: {}".format(nested))
+
+
+def require_relay_dir():
+    relay_dir = find_relay_dir()
+    if not relay_dir:
+        die("no .agent-relay directory found; run: relay init [project-path]")
+    runtime_paths_are_safe(relay_dir)
+    return relay_dir
+
+
+def project_root(relay_dir):
+    return os.path.dirname(relay_dir)
+
+
+def tasks_dir(relay_dir):
+    return os.path.join(relay_dir, "tasks")
+
+
+def work_dir(relay_dir, task_id=""):
+    base = os.path.join(relay_dir, "work")
+    if task_id:
+        validate_task_id(task_id)
+        return os.path.join(base, task_id)
+    return base
+
+
+def archive_dir(relay_dir):
+    return os.path.join(relay_dir, "archive")
+
+
+def lock_path(relay_dir, name):
+    return os.path.join(relay_dir, ".locks", name + ".lock")
+
+
+@contextmanager
+def file_lock(path):
+    import fcntl
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def task_lock(relay_dir, task_id):
+    validate_task_id(task_id)
+    with file_lock(lock_path(relay_dir, "task-" + task_id)):
+        yield
+
+
+def atomic_write(path, content, mode=0o644):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".relay-write-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.unlink(temp_path)
+        raise
+
+
+def atomic_json(path, value):
+    atomic_write(path, json.dumps(value, indent=2) + "\n")
+
+
+def require_orchestrator():
+    if os.environ.get("RELAY_TASK_ID"):
+        die("worker processes cannot run orchestrator commands")
+
+
+# Config
+
+def load_config(relay_dir):
+    import tomllib
+
+    path = os.path.join(relay_dir, "config.toml")
+    if not os.path.exists(path):
+        die("missing config.toml")
+    try:
+        with open(path, "rb") as config_file:
+            return tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        die("cannot parse {}: {}".format(path, error))
+
+
+def cfg_get(config, dotted_path, default=None):
+    value = config
+    for key in dotted_path.split("."):
+        if not isinstance(value, dict) or key not in value:
+            return default
+        value = value[key]
+    return value
+
+
+def configured_limits(config, override=None):
+    max_parallel = override if override is not None else cfg_get(config, "limits.max_parallel", 3)
+    timeout = cfg_get(config, "limits.worker_timeout_minutes", 60)
+    if isinstance(max_parallel, bool) or not isinstance(max_parallel, int) or max_parallel < 1:
+        raise ValueError("max_parallel must be an integer of at least 1")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout < 0:
+        raise ValueError("worker_timeout_minutes must be a non-negative number")
+    return max_parallel, float(timeout)
+
+
+def command_template(config, task):
+    tier = task.get("tier", "default")
+    return (
+        cfg_get(config, "tiers.{}.command".format(tier), "")
+        or cfg_get(config, "commands.worker", "")
+    )
+
+
+def worker_argv(config, task, prompt, prompt_file, root):
+    template = command_template(config, task)
+    if not isinstance(template, str) or not template.strip():
+        raise ValueError("no worker command configured")
+    try:
+        argv = shlex.split(template)
+    except ValueError as error:
+        raise ValueError("invalid worker command: {}".format(error)) from error
+    placeholders = [(index, token) for index, token in enumerate(argv)
+                    if token in ("{prompt}", "{prompt_file}")]
+    if len(placeholders) != 1:
+        raise ValueError("worker command needs exactly one {prompt} or {prompt_file} argument")
+    for token in argv:
+        if ("{prompt}" in token or "{prompt_file}" in token) and token not in (
+                "{prompt}", "{prompt_file}"):
+            raise ValueError("the prompt placeholder must be a complete command argument")
+    index, placeholder = placeholders[0]
+    argv[index] = prompt if placeholder == "{prompt}" else prompt_file
+    executable = argv[0]
+    if os.path.sep in executable:
+        candidate = executable if os.path.isabs(executable) else os.path.join(root, executable)
+        if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+            raise ValueError("worker executable not found: {}".format(executable))
+    elif not shutil.which(executable):
+        raise ValueError("worker executable not found: {}".format(executable))
+    return argv
+
+
+# Tasks
+
+def task_json_path(relay_dir, task_id):
+    validate_task_id(task_id)
+    return os.path.join(tasks_dir(relay_dir), task_id + ".json")
+
+
+def task_md_path(relay_dir, task_id):
+    validate_task_id(task_id)
+    return os.path.join(tasks_dir(relay_dir), task_id + ".md")
+
+
+def report_path(relay_dir, task_id, attempt):
+    return os.path.join(work_dir(relay_dir, task_id), "attempt-%d.report.md" % attempt)
+
+
+def result_path(relay_dir, task_id, attempt):
+    return os.path.join(work_dir(relay_dir, task_id), "attempt-%d.result.json" % attempt)
+
+
+def report_is_ready(path):
+    return (
+        os.path.isfile(path)
+        and not os.path.islink(path)
+        and os.path.getsize(path) > 0
+    )
+
+
+def read_json(path):
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise OSError("not a regular JSON file: {}".format(path))
+    with open(path, encoding="utf-8") as source:
+        return json.load(source)
+
+
+def load_task(relay_dir, task_id, include_archive=False):
+    path = task_json_path(relay_dir, task_id)
+    if not os.path.exists(path) and include_archive:
+        path = os.path.join(archive_dir(relay_dir), task_id + ".json")
+    if not os.path.exists(path):
+        die("no such task: {}".format(task_id))
+    try:
+        return read_json(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        die("cannot read task {}: {}".format(task_id, error))
+
+
+def save_task(relay_dir, task):
+    task["updated_at"] = now()
+    atomic_json(task_json_path(relay_dir, task["id"]), task)
+
+
+def record(task, event, **details):
+    entry = {"at": now(), "event": event}
+    entry.update(details)
+    task.setdefault("history", []).append(entry)
+
+
+def load_tasks_from(directory):
+    tasks: list[dict] = []
+    if not os.path.isdir(directory):
+        return tasks
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(".json"):
+            path = os.path.join(directory, name)
+            try:
+                tasks.append(read_json(path))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    "cannot read task state {}: {}".format(path, error)
+                ) from error
+    return tasks
+
+
+def load_all_tasks(relay_dir):
+    return load_tasks_from(tasks_dir(relay_dir))
+
+
+def load_archived_tasks(relay_dir):
+    return load_tasks_from(archive_dir(relay_dir))
+
+
+def slugify(title):
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug[:40] or "task"
+
+
+def validate_task_id(task_id):
+    if (not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id)
+            or int(task_id[1:task_id.index("-")]) < 1):
+        raise ValueError("task id must look like T001-short-slug")
+
+
+def normalize_scope(pattern):
+    import posixpath
+
+    if not isinstance(pattern, str):
+        raise ValueError("scope must be text")
+    pattern = pattern.strip()
+    if not pattern:
+        raise ValueError("scope cannot be empty")
+    if pattern == ".":
+        return None
+    if "\\" in pattern:
+        raise ValueError("scope must use forward slashes")
+    if pattern.startswith("/") or re.match(r"^[A-Za-z]:", pattern):
+        raise ValueError("scope must be relative to the project")
+    if any(part == ".." for part in pattern.split("/")):
+        raise ValueError("scope cannot contain ..")
+    if "[" in pattern or "]" in pattern:
+        raise ValueError("scope supports *, **, and ? but not character classes")
+    normalized = posixpath.normpath(pattern)
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized == ".":
+        return None
+    for part in normalized.split("/"):
+        if "**" in part and part != "**":
+            raise ValueError("** must be a complete path segment")
+    return normalized
+
+
+def normalize_scopes(scopes):
+    if not scopes:
+        return []
+    normalized = []
+    keys = set()
+    for scope in scopes:
+        value = normalize_scope(scope)
+        if value is None:
+            return []
+        key = value.casefold()
+        if key not in keys:
+            normalized.append(value)
+            keys.add(key)
+    return normalized
+
+
+def fixed_scope_prefix(scope):
+    prefix = []
+    for part in scope.split("/"):
+        if "*" in part or "?" in part:
+            break
+        prefix.append(part.casefold())
+    return tuple(prefix)
+
+
+def scopes_overlap(first, second):
+    if not first or not second:
+        return True
+    for left in first:
+        for right in second:
+            a = fixed_scope_prefix(left)
+            b = fixed_scope_prefix(right)
+            shared = min(len(a), len(b))
+            if a[:shared] == b[:shared]:
+                return True
+    return False
+
+
+def scope_pattern_matches(path, pattern):
+    import fnmatch
+
+    path_parts = tuple(part.casefold() for part in path.split("/") if part)
+    pattern_parts = tuple(part.casefold() for part in pattern.split("/") if part)
+    memo: dict[tuple[int, int], bool] = {}
+
+    def match(path_index, pattern_index):
+        key = (path_index, pattern_index)
+        if key in memo:
+            return memo[key]
+        if pattern_index == len(pattern_parts):
+            answer = path_index == len(path_parts)
+        elif pattern_parts[pattern_index] == "**":
+            answer = match(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and match(path_index + 1, pattern_index)
+            )
+        else:
+            answer = (
+                path_index < len(path_parts)
+                and fnmatch.fnmatchcase(path_parts[path_index], pattern_parts[pattern_index])
+                and match(path_index + 1, pattern_index + 1)
+            )
+        memo[key] = answer
+        return answer
+
+    return match(0, 0)
+
+
+def normalize_changed_paths(paths):
+    normalized = []
+    keys = set()
+    for path in paths:
+        value = normalize_scope(path)
+        if value is None or "*" in value or "?" in value:
+            raise ValueError("changed paths must be exact project-relative paths")
+        key = value.casefold()
+        if key not in keys:
+            normalized.append(value)
+            keys.add(key)
+    return normalized
+
+
+def path_in_scopes(path, scopes):
+    if not scopes:
+        return True
+    path = path.replace(os.sep, "/")
+    if path.startswith("./"):
+        path = path[2:]
+    path_key = path.casefold()
+    for scope in scopes:
+        scope_key = scope.casefold()
+        if "*" not in scope and "?" not in scope:
+            if path_key == scope_key or path_key.startswith(scope_key + "/"):
+                return True
+        elif scope_pattern_matches(path, scope):
+            return True
+    return False
+
+
+def next_task_id(relay_dir, title):
+    numbers = [0]
+    for task in load_all_tasks(relay_dir) + load_archived_tasks(relay_dir):
+        match = re.match(r"T(\d+)", task.get("id", ""))
+        if match:
+            numbers.append(int(match.group(1)))
+    return "T%03d-%s" % (max(numbers) + 1, slugify(title))
+
+
+TASK_MD_TEMPLATE = """# {id}: {title}
+
+## Objective
+Replace this line with one clear outcome.
+
+## Acceptance criteria
+- Add observable requirements.
+
+## Context
+List the paths and facts the worker needs. Reference memory ids when useful.
+
+## Not allowed
+- No changes outside the task scope.
+- No unrelated cleanup or new dependencies.
+
+## Verification
+- Add exact, targeted commands.
+
+## Decisions
+
+## Review feedback
+"""
+
+
+def cmd_task_create(args):
+    require_orchestrator()
+    if not args.title.strip():
+        die("task title cannot be empty")
+    relay_dir = require_relay_dir()
+    with file_lock(lock_path(relay_dir, "scheduler")):
+        task_id = next_task_id(relay_dir, args.title)
+        try:
+            validate_task_id(task_id)
+            scopes = normalize_scopes(args.scope)
+        except ValueError as error:
+            die(str(error))
+        if any(task.get("id") == task_id for task in (
+                load_all_tasks(relay_dir) + load_archived_tasks(relay_dir))):
+            die("task already exists: {}".format(task_id))
+        dependencies = args.depends_on or []
+        if len(dependencies) != len(set(dependencies)):
+            die("dependencies cannot be repeated")
+        if task_id in dependencies:
+            die("a task cannot depend on itself")
+        known = {task["id"]: task for task in load_all_tasks(relay_dir) + load_archived_tasks(relay_dir)}
+        for dependency in dependencies:
+            if dependency not in known:
+                die("unknown dependency: {}".format(dependency))
+            if known[dependency]["status"] == "cancelled":
+                die("dependency is cancelled: {}".format(dependency))
+        task = {
+            "id": task_id,
+            "title": args.title,
+            "status": "queued",
+            "attempt": 1,
+            "tier": args.tier or "default",
+            "scope": scopes,
+            "depends_on": dependencies,
+            "created_at": now(),
+            "updated_at": now(),
+            "history": [],
+        }
+        record(task, "created")
+        os.makedirs(tasks_dir(relay_dir), exist_ok=True)
+        save_task(relay_dir, task)
+        atomic_write(task_md_path(relay_dir, task_id), TASK_MD_TEMPLATE.format(
+            id=task_id, title=args.title,
+        ))
+    say("created {}".format(task_id))
+    say("edit {}".format(os.path.relpath(task_md_path(relay_dir, task_id))))
+
+
+def cmd_task_list(args):
+    relay_dir = require_relay_dir()
+    tasks = load_all_tasks(relay_dir)
+    if args.json:
+        say(json.dumps(tasks, indent=2))
+        return
+    if not tasks:
+        say("no tasks")
+        return
+    layout = "%-28s %-14s %-3s %-24s %s"
+    say(layout % ("ID", "STATUS", "ATT", "SCOPE", "TITLE"))
+    for task in tasks:
+        scope = ",".join(task.get("scope", [])) or "*"
+        say(layout % (
+            task["id"], task["status"], task.get("attempt", 1),
+            scope[:24], task.get("title", ""),
+        ))
+
+
+def cmd_task_show(args):
+    relay_dir = require_relay_dir()
+    task = load_task(relay_dir, args.id, include_archive=True)
+    say(json.dumps(task, indent=2))
+
+
+def append_md_section(relay_dir, task_id, section, text):
+    path = task_md_path(relay_dir, task_id)
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as source:
+        content = source.read()
+    marker = "## " + section
+    if marker in content:
+        index = content.index(marker) + len(marker)
+        newline = content.find("\n", index)
+        if newline == -1:
+            content += "\n" + text.rstrip() + "\n"
+        else:
+            newline += 1
+            content = content[:newline] + text.rstrip() + "\n" + content[newline:]
+    else:
+        content = content.rstrip() + "\n\n" + marker + "\n" + text.rstrip() + "\n"
+    atomic_write(path, content)
+
+
+def ensure_not_live(task):
+    runner = task.get("runner")
+    if runner and pid_alive(runner.get("pid")):
+        die("{} still has a live worker".format(task["id"]))
+
+
+def cmd_task_accept(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    with task_lock(relay_dir, args.id):
+        task = load_task(relay_dir, args.id)
+        ensure_not_live(task)
+        if task.get("scope_violations"):
+            die("{} has unresolved scope violations".format(task["id"]))
+        if task["status"] != "needs_review":
+            die("{} is {}, not needs_review".format(task["id"], task["status"]))
+        task["status"] = "done"
+        record(task, "accepted", note=args.note or "")
+        save_task(relay_dir, task)
+    say("{} accepted".format(task["id"]))
+
+
+def cmd_task_return(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    with task_lock(relay_dir, args.id):
+        task = load_task(relay_dir, args.id)
+        ensure_not_live(task)
+        if task["status"] not in WORKER_FINAL:
+            die("{} is {}; it cannot be returned".format(task["id"], task["status"]))
+        violations = task.get("scope_violations", [])
+        if violations:
+            baseline = task.get("scope_baseline")
+            if not baseline:
+                die("scope violation baseline is missing; run relay validate")
+            root = project_root(relay_dir)
+            require_git_root(root)
+            current_tree = git_snapshot(root)
+            changed = set(git_changed_paths(root, baseline, current_tree))
+            unresolved = [path for path in violations if path in changed]
+            if unresolved:
+                die("restore scope-violating paths before returning: " + ", ".join(unresolved))
+        previous_attempt = task.get("attempt", 1)
+        task["status"] = "queued"
+        task["attempt"] = previous_attempt + 1
+        task.pop("runner", None)
+        task.pop("scope_violations", None)
+        task.pop("scope_baseline", None)
+        task.pop("last_note", None)
+        record(task, "returned", reason=args.reason)
+        save_task(relay_dir, task)
+        append_md_section(
+            relay_dir, task["id"], "Review feedback",
+            "- attempt %d: %s" % (previous_attempt, args.reason),
+        )
+    say("%s returned for attempt %d" % (task["id"], task["attempt"]))
+
+
+def cmd_task_decide(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    with task_lock(relay_dir, args.id):
+        task = load_task(relay_dir, args.id)
+        ensure_not_live(task)
+        if task["status"] != "needs_decision":
+            die("{} is {}, not needs_decision".format(task["id"], task["status"]))
+        task["status"] = "queued"
+        task["attempt"] = task.get("attempt", 1) + 1
+        task.pop("last_note", None)
+        record(task, "decided", answer=args.answer)
+        save_task(relay_dir, task)
+        append_md_section(relay_dir, task["id"], "Decisions", "- " + args.answer)
+    say("{} answered and re-queued".format(task["id"]))
+
+
+def cmd_task_cancel(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    with file_lock(lock_path(relay_dir, "scheduler")):
+        with task_lock(relay_dir, args.id):
+            task = load_task(relay_dir, args.id)
+            ensure_not_live(task)
+            if task["status"] == "running":
+                die("{} is running; wait for it or stop the relay process".format(task["id"]))
+            if task["status"] == "done":
+                die("{} is already done".format(task["id"]))
+            task["status"] = "cancelled"
+            record(task, "cancelled", reason=args.reason or "")
+            save_task(relay_dir, task)
+    say("{} cancelled".format(task["id"]))
+
+
+def cmd_task_finish(args):
+    relay_dir = require_relay_dir()
+    worker_id = os.environ.get("RELAY_TASK_ID")
+    worker_attempt = os.environ.get("RELAY_ATTEMPT")
+    worker_lease = os.environ.get("RELAY_LEASE")
+    if not worker_id or not worker_lease:
+        die("task finish is available only inside a leased worker process")
+    if worker_id != args.id:
+        die("a worker may finish only its assigned task: {}".format(worker_id))
+    with task_lock(relay_dir, args.id):
+        task = load_task(relay_dir, args.id)
+        attempt = task.get("attempt", 1)
+        if worker_attempt != str(attempt):
+            die("worker attempt does not match current task attempt")
+        if task.get("runner", {}).get("lease") != worker_lease:
+            die("worker lease does not match current task lease")
+        if task["status"] != "running":
+            die("{} is {}, not running".format(task["id"], task["status"]))
+        report = report_path(relay_dir, task["id"], attempt)
+        if args.status == "needs_review" and not report_is_ready(report):
+            die("write a non-empty regular report before requesting review")
+        path = result_path(relay_dir, task["id"], attempt)
+        if os.path.exists(path):
+            die("final status was already submitted for this attempt")
+        try:
+            changed_paths = normalize_changed_paths(args.changed)
+        except ValueError as error:
+            die(str(error))
+        atomic_json(path, {
+            "status": args.status,
+            "note": args.note or "",
+            "at": now(),
+            "lease": worker_lease,
+            "changed_paths": changed_paths,
+        })
+    say("{} submitted {}".format(task["id"], args.status))
+
+
+def cmd_task_unlock(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    with file_lock(lock_path(relay_dir, "execution")):
+        with task_lock(relay_dir, args.id):
+            task = load_task(relay_dir, args.id)
+            if task["status"] != "running":
+                die("{} is not running".format(task["id"]))
+            pid = task.get("runner", {}).get("pid")
+            if pid_alive(pid):
+                die("worker pid {} is still alive; stop it before unlocking".format(pid))
+            task["status"] = "failed"
+            task.pop("runner", None)
+            task["last_note"] = "stale_runner"
+            record(task, "unlocked", reason="stale_runner")
+            save_task(relay_dir, task)
+    say("{} marked failed; return it to retry".format(task["id"]))
+
+
+# Git snapshots and diffs
+
+def git_run(root, *arguments, env=None, text=True):
+    try:
+        return subprocess.run(
+            ["git", "-C", root, *arguments], env=env,
+            capture_output=True, text=text,
+        )
+    except FileNotFoundError:
+        die("Git is required")
+
+
+def is_git_repo(root):
+    result = git_run(root, "rev-parse", "--is-inside-work-tree")
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def gitlink_paths(output):
+    paths = []
+    for entry in output.split("\0"):
+        if not entry or "\t" not in entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        if metadata.split()[0] == "160000":
+            paths.append(path)
+    return paths
+
+
+def git_submodule_paths(root):
+    paths = set(gitlink_paths(git_checked(root, "ls-files", "--stage", "-z")))
+    head = git_run(root, "ls-tree", "-r", "-z", "HEAD")
+    if head.returncode == 0:
+        paths.update(gitlink_paths(head.stdout))
+    return sorted(paths)
+
+
+def require_git_root(root):
+    if not is_git_repo(root):
+        die("Agent Relay requires a Git repository")
+    top_level = git_checked(root, "rev-parse", "--show-toplevel").strip()
+    if os.path.realpath(root) != os.path.realpath(top_level):
+        die("Agent Relay must run from the Git worktree root: {}".format(top_level))
+    submodules = git_submodule_paths(root)
+    if submodules:
+        die("tracked Git submodules are unsupported: " + ", ".join(submodules))
+
+
+def git_checked(root, *arguments, env=None, text=True):
+    result = git_run(root, *arguments, env=env, text=text)
+    if result.returncode:
+        stderr = result.stderr if text else os.fsdecode(result.stderr)
+        raise RuntimeError("git {} failed: {}".format(arguments[0], stderr.strip()))
+    return result.stdout
+
+
+def git_snapshot(root):
+    fd, index_path = tempfile.mkstemp(prefix="agent-relay-index-")
+    os.close(fd)
+    os.unlink(index_path)
+    env = dict(os.environ, GIT_INDEX_FILE=index_path)
+    try:
+        head = git_run(root, "rev-parse", "--verify", "HEAD")
+        if head.returncode == 0:
+            git_checked(root, "read-tree", "HEAD", env=env)
+        else:
+            git_checked(root, "read-tree", "--empty", env=env)
+        git_checked(root, "add", "-A", "--", ".", env=env)
+        tree = git_checked(root, "write-tree", env=env).strip()
+        links = gitlink_paths(git_checked(root, "ls-tree", "-r", "-z", tree))
+        if links:
+            raise RuntimeError("Git submodules are unsupported: " + ", ".join(links))
+        return tree
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(index_path)
+
+
+def git_changed_paths(root, before_tree, after_tree):
+    output = git_checked(
+        root, "diff", "--name-only", "-z", "--no-renames",
+        before_tree, after_tree, text=False,
+    )
+    return sorted(os.fsdecode(item) for item in output.split(b"\0") if item)
+
+
+def git_paths_diff(root, before_tree, after_tree, paths):
+    if not paths:
+        return ""
+    pathspecs = [":(literal)" + path for path in paths]
+    return git_checked(
+        root, "diff", "--binary", "--no-renames", before_tree, after_tree,
+        "--", *pathspecs,
+    )
+
+
+def git_tree_diff(root, before_tree, after_tree, scopes, changed_paths):
+    paths = [path for path in changed_paths if path_in_scopes(path, scopes)]
+    return git_paths_diff(root, before_tree, after_tree, paths)
+
+
+# Runner
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def terminate_process_groups(pids, grace=0.5):
+    groups = []
+    for pid in pids:
+        if not pid:
+            continue
+        try:
+            group = int(pid)
+            os.killpg(group, signal.SIGTERM)
+            groups.append(group)
+        except (OSError, TypeError, ValueError):
+            continue
+    deadline = time.monotonic() + grace
+    while groups and time.monotonic() < deadline:
+        alive = []
+        for group in groups:
+            try:
+                os.killpg(group, 0)
+                alive.append(group)
+            except OSError:
+                pass
+        groups = alive
+        if groups:
+            time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+    for group in groups:
+        with suppress(OSError):
+            os.killpg(group, signal.SIGKILL)
+
+
+def terminate_process_group(pid, grace=0.5):
+    terminate_process_groups([pid], grace)
+
+
+WORKER_PROMPT = """Agent Relay worker: {id}, attempt {attempt}
+Project: {root}
+Scope: {scope}
+
+Read and follow:
+- {relay_dir}/worker.md
+- {relay_dir}/tasks/{id}.md{previous}
+
+Write the report to {report}, then run with every exact changed path:
+python3 {relay_dir}/relay task finish {id} --status needs_review [--changed PATH ...]
+Use needs_decision, blocked, or failed instead when needed.
+Other workers may be active. Run only the targeted checks in the task spec.
+"""
+
+
+def build_prompt(relay_dir, task):
+    root = project_root(relay_dir)
+    relative_relay = os.path.relpath(relay_dir, root)
+    attempt = task.get("attempt", 1)
+    previous = ""
+    if attempt > 1:
+        previous = "\n- %s/work/%s/attempt-%d.report.md" % (
+            relative_relay, task["id"], attempt - 1,
+        )
+    return WORKER_PROMPT.format(
+        id=task["id"], attempt=attempt, root=root,
+        scope=", ".join(task.get("scope", [])) or "whole project",
+        relay_dir=relative_relay, previous=previous,
+        report=os.path.relpath(report_path(relay_dir, task["id"], attempt), root),
+    )
+
+
+def prepare_worker(relay_dir, config, task):
+    root = project_root(relay_dir)
+    attempt = task.get("attempt", 1)
+    directory = work_dir(relay_dir, task["id"])
+    os.makedirs(directory, exist_ok=True)
+    prompt = build_prompt(relay_dir, task)
+    prompt_file = os.path.join(directory, "attempt-%d.prompt.md" % attempt)
+    atomic_write(prompt_file, prompt + "\n")
+    result = result_path(relay_dir, task["id"], attempt)
+    if os.path.exists(result):
+        raise ValueError("result already exists for %s attempt %d" % (task["id"], attempt))
+    argv = worker_argv(config, task, prompt, prompt_file, root)
+    return {
+        "task": task,
+        "argv": argv,
+        "prompt_file": prompt_file,
+        "log_path": os.path.join(directory, "attempt-%d.log" % attempt),
+    }
+
+
+def run_one_worker(relay_dir, prepared, timeout_minutes, stop_event):
+    task = prepared["task"]
+    root = project_root(relay_dir)
+    attempt = task.get("attempt", 1)
+    environment = dict(
+        os.environ,
+        RELAY_TASK_ID=task["id"],
+        RELAY_ATTEMPT=str(attempt),
+        RELAY_LEASE=prepared["lease"],
+        RELAY_DIR=relay_dir,
+        RELAY_ROOT=root,
+    )
+    say("[%s] start attempt %d (%s)" % (
+        task["id"], attempt, task.get("tier", "default"),
+    ))
+    process = None
+    try:
+        if stop_event.is_set():
+            return {"interrupted": True, "returncode": None}
+        with open(prepared["log_path"], "w", encoding="utf-8") as log:
+            process = subprocess.Popen(
+                prepared["argv"], cwd=root, env=environment,
+                stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            if stop_event.is_set():
+                terminate_process_group(process.pid)
+                process.wait()
+                return {"interrupted": True, "returncode": None}
+            with task_lock(relay_dir, task["id"]):
+                current = load_task(relay_dir, task["id"])
+                runner = current.get("runner", {})
+                if (
+                        current["status"] != "running"
+                        or current.get("attempt", 1) != attempt
+                        or runner.get("lease") != prepared["lease"]):
+                    terminate_process_group(process.pid)
+                    process.wait()
+                    return {"error": "task_state_changed", "returncode": None}
+                runner["pid"] = process.pid
+                runner["started_at"] = now()
+                current["runner"] = runner
+                save_task(relay_dir, current)
+            try:
+                returncode = process.wait(
+                    timeout=timeout_minutes * 60 if timeout_minutes else None,
+                )
+            except subprocess.TimeoutExpired:
+                terminate_process_group(process.pid)
+                process.wait()
+                return {"timeout": True, "returncode": None}
+        terminate_process_group(process.pid, grace=0.1)
+        return {"returncode": returncode}
+    except BaseException as error:
+        if process and process.poll() is None:
+            terminate_process_group(process.pid)
+            process.wait()
+        return {"error": "{}: {}".format(type(error).__name__, error), "returncode": None}
+
+
+def pick_wave(tasks, archived_tasks, requested_ids, max_parallel, busy_scopes):
+    done = {task["id"] for task in tasks + archived_tasks if task.get("status") == "done"}
+    by_id = {task["id"]: task for task in tasks}
+    if requested_ids:
+        candidates = []
+        for task_id in requested_ids:
+            if task_id not in by_id:
+                die("no such active task: {}".format(task_id))
+            candidates.append(by_id[task_id])
+    else:
+        candidates = [task for task in tasks if task.get("status") == "queued"]
+    wave: list[dict] = []
+    skipped = []
+    leased = list(busy_scopes)
+    for task in candidates:
+        if task.get("status") != "queued":
+            skipped.append((task["id"], "status is {}".format(task.get("status"))))
+            continue
+        missing = [item for item in task.get("depends_on", []) if item not in done]
+        if missing:
+            skipped.append((task["id"], "waiting on {}".format(",".join(missing))))
+            continue
+        if any(scopes_overlap(task.get("scope", []), scope) for scope in leased):
+            skipped.append((task["id"], "scope conflicts with another lease"))
+            continue
+        if len(wave) >= max_parallel:
+            skipped.append((task["id"], "max_parallel reached"))
+            continue
+        wave.append(task)
+        leased.append(task.get("scope", []))
+    return wave, skipped
+
+
+def worker_changed_paths(value):
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return None
+    try:
+        normalized = normalize_changed_paths(value)
+    except ValueError:
+        return None
+    if normalized != value:
+        return None
+    return normalized
+
+
+def finalize_task(
+        relay_dir, task, outcome, violations, observed_paths, baseline_tree, lease):
+    attempt = task.get("attempt", 1)
+    submitted = None
+    path = result_path(relay_dir, task["id"], attempt)
+    if os.path.exists(path):
+        try:
+            submitted = read_json(path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            submitted = None
+    with task_lock(relay_dir, task["id"]):
+        current = load_task(relay_dir, task["id"])
+        runner = current.get("runner", {})
+        if (
+                current.get("status") != "running"
+                or current.get("attempt", 1) != attempt
+                or runner.get("lease") != lease):
+            say("[{}] stale finalizer ignored".format(task["id"]))
+            return False
+        current.pop("runner", None)
+        note = ""
+        declared_paths = (
+            worker_changed_paths(submitted.get("changed_paths"))
+            if isinstance(submitted, dict) else None
+        )
+        if outcome.get("interrupted"):
+            status, note = "failed", "orchestrator_interrupted"
+        elif outcome.get("timeout"):
+            status, note = "failed", "worker_timeout"
+        elif outcome.get("error"):
+            status, note = "failed", "worker_error: " + outcome["error"]
+        elif outcome.get("returncode") != 0:
+            status, note = "failed", "worker_exit_{}".format(outcome.get("returncode"))
+        elif (
+                not isinstance(submitted, dict)
+                or submitted.get("status") not in WORKER_FINAL
+                or not isinstance(submitted.get("note"), str)
+                or not isinstance(submitted.get("at"), str)
+                or submitted.get("lease") != lease
+                or declared_paths is None):
+            status, note = "failed", "invalid_worker_output"
+        elif submitted["status"] == "needs_review" and not report_is_ready(
+                report_path(relay_dir, task["id"], attempt)):
+            status, note = "failed", "missing_review_report"
+        elif violations:
+            status, note = "blocked", "scope_violation"
+        elif (
+                {path.casefold() for path in declared_paths or []}
+                != {path.casefold() for path in observed_paths}):
+            status, note = "failed", "changed_paths_mismatch"
+        else:
+            status = submitted["status"]
+            note = submitted.get("note", "")
+        current["status"] = status
+        if note:
+            current["last_note"] = note
+        else:
+            current.pop("last_note", None)
+        if violations:
+            current["scope_violations"] = list(violations)
+            current["scope_baseline"] = baseline_tree
+        else:
+            current.pop("scope_violations", None)
+            current.pop("scope_baseline", None)
+        record(
+            current, "worker_exited", status=status,
+            exit_code=outcome.get("returncode"), note=note,
+        )
+        save_task(relay_dir, current)
+    say("[{}] {}{}".format(
+        task["id"], status, " ({})".format(note) if note else "",
+    ))
+    return True
+
+
+def abort_claimed_tasks(relay_dir, context):
+    context["stop_event"].set()
+    pids = []
+    for task_id in context["task_ids"]:
+        task = load_task(relay_dir, task_id)
+        runner = task.get("runner", {})
+        if runner.get("lease") == context["lease"]:
+            pids.append(runner.get("pid"))
+    terminate_process_groups(pids)
+    for task_id in context["task_ids"]:
+        with task_lock(relay_dir, task_id):
+            task = load_task(relay_dir, task_id)
+            runner = task.get("runner", {})
+            if task.get("status") != "running" or runner.get("lease") != context["lease"]:
+                continue
+            task.pop("runner", None)
+            task["status"] = "failed"
+            task["last_note"] = "orchestrator_interrupted"
+            record(task, "worker_exited", status="failed",
+                   exit_code=None, note="orchestrator_interrupted")
+            save_task(relay_dir, task)
+
+
+def cmd_run(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    import secrets
+
+    context = {
+        "lease": secrets.token_hex(16),
+        "stop_event": threading.Event(),
+        "task_ids": [],
+    }
+    watched = [signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        watched.append(signal.SIGHUP)
+    previous = {item: signal.getsignal(item) for item in watched}
+    for item in watched:
+        signal.signal(item, handle_run_signal)
+    try:
+        if args.dry_run:
+            run_wave(args, relay_dir, context)
+        else:
+            with file_lock(lock_path(relay_dir, "execution")):
+                run_wave(args, relay_dir, context)
+    except KeyboardInterrupt:
+        abort_claimed_tasks(relay_dir, context)
+        raise SystemExit(130) from None
+    except RunInterrupted as error:
+        abort_claimed_tasks(relay_dir, context)
+        raise SystemExit(128 + error.signum) from None
+    finally:
+        for item, handler in previous.items():
+            signal.signal(item, handler)
+
+
+def run_wave(args, relay_dir, context):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    root = project_root(relay_dir)
+    require_git_root(root)
+    config = load_config(relay_dir)
+    try:
+        max_parallel, timeout_minutes = configured_limits(config, args.max_parallel)
+    except ValueError as error:
+        die(str(error))
+
+    with file_lock(lock_path(relay_dir, "scheduler")):
+        tasks = load_all_tasks(relay_dir)
+        archived = load_archived_tasks(relay_dir)
+        busy_scopes = [task.get("scope", []) for task in tasks
+                       if task.get("status") == "running"]
+        wave, skipped = pick_wave(tasks, archived, args.ids, max_parallel, busy_scopes)
+        if args.dry_run:
+            say("would run: %s" % (", ".join(task["id"] for task in wave) or "(nothing)"))
+            for task_id, reason in skipped:
+                say("  skip {}: {}".format(task_id, reason))
+            return
+        if not wave:
+            say("would run: (nothing)")
+            for task_id, reason in skipped:
+                say("  skip {}: {}".format(task_id, reason))
+            raise SystemExit(0 if not skipped else 1)
+        try:
+            prepared = [prepare_worker(relay_dir, config, task) for task in wave]
+            for item in prepared:
+                item["lease"] = context["lease"]
+            before_tree = git_snapshot(root)
+        except (OSError, RuntimeError, ValueError) as error:
+            die(str(error))
+        context["task_ids"] = [task["id"] for task in wave]
+        for task in wave:
+            with task_lock(relay_dir, task["id"]):
+                current = load_task(relay_dir, task["id"])
+                if current["status"] != "queued":
+                    die("{} is no longer queued".format(task["id"]))
+                current["status"] = "running"
+                current["runner"] = {
+                    "pid": None, "started_at": now(), "lease": context["lease"],
+                }
+                record(current, "launched", attempt=current.get("attempt", 1),
+                       lease=context["lease"])
+                save_task(relay_dir, current)
+
+    outcomes = {}
+    interrupted = False
+    interrupted_code = 130
+    stop_event = context["stop_event"]
+    executor = None
+    futures = {}
+    try:
+        executor = ThreadPoolExecutor(max_workers=len(wave))
+        futures = {
+            executor.submit(
+                run_one_worker, relay_dir, item, timeout_minutes, stop_event,
+            ): item["task"]
+            for item in prepared
+        }
+        for future in as_completed(futures):
+            outcomes[futures[future]["id"]] = future.result()
+    except (KeyboardInterrupt, RunInterrupted) as error:
+        interrupted = True
+        if isinstance(error, RunInterrupted):
+            interrupted_code = 128 + error.signum
+        stop_event.set()
+        terminate_process_groups([
+            load_task(relay_dir, task["id"]).get("runner", {}).get("pid")
+            for task in wave
+        ])
+    except Exception as error:
+        stop_event.set()
+        pids = []
+        for task in wave:
+            current = load_task(relay_dir, task["id"])
+            pids.append(current.get("runner", {}).get("pid"))
+            outcomes[task["id"]] = {
+                "error": "executor_error: {}".format(error),
+                "returncode": None,
+            }
+        terminate_process_groups(pids)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+    if interrupted:
+        for task in wave:
+            outcomes[task["id"]] = {
+                "interrupted": True,
+                "returncode": None,
+            }
+
+    try:
+        after_tree = git_snapshot(root)
+        changed = git_changed_paths(root, before_tree, after_tree)
+    except RuntimeError as error:
+        after_tree = before_tree
+        changed = []
+        for task in wave:
+            outcomes[task["id"]] = {"error": str(error), "returncode": None}
+
+    wave_scopes = [scope for task in wave for scope in (task.get("scope", []) or ["**"])]
+    violations = [path for path in changed if not path_in_scopes(path, wave_scopes)]
+    violations_diff = git_paths_diff(root, before_tree, after_tree, violations)
+    for task in wave:
+        attempt = task.get("attempt", 1)
+        diff = git_tree_diff(
+            root, before_tree, after_tree, task.get("scope", []), changed,
+        )
+        directory = work_dir(relay_dir, task["id"])
+        atomic_write(os.path.join(directory, "attempt-%d.diff" % attempt), diff)
+        if violations:
+            atomic_write(
+                os.path.join(directory, "attempt-%d.violations.diff" % attempt),
+                violations_diff,
+            )
+    if violations:
+        say("scope violation: " + ", ".join(violations))
+    for task in wave:
+        observed = [
+            path for path in changed
+            if path_in_scopes(path, task.get("scope", []))
+        ]
+        finalize_task(
+            relay_dir, task, outcomes[task["id"]], violations, observed,
+            before_tree, context["lease"],
+        )
+    say("review each report and diff, then accept, return, or decide")
+    if interrupted:
+        raise SystemExit(interrupted_code)
+
+
+# Status, validation, and archive
+
+def cmd_status(args):
+    relay_dir = require_relay_dir()
+    tasks = load_all_tasks(relay_dir)
+    counts: dict[str, int] = {}
+    for task in tasks:
+        counts[task["status"]] = counts.get(task["status"], 0) + 1
+    say("tasks: " + (", ".join("%s=%d" % item for item in sorted(counts.items())) or "none"))
+    for task in tasks:
+        if task["status"] == "running":
+            pid = task.get("runner", {}).get("pid")
+            state = "alive" if pid_alive(pid) else "STALE"
+            say("  running: {} pid={} {}".format(task["id"], pid, state))
+        elif task["status"] in WORKER_FINAL:
+            note = " - " + task["last_note"] if task.get("last_note") else ""
+            say("  attention: {} ({}){}".format(task["id"], task["status"], note))
+
+
+def dependency_cycles(tasks):
+    by_id = {task.get("id"): task for task in tasks}
+    visiting: list[str] = []
+    visited = set()
+    cycles = []
+
+    def visit(task_id):
+        if task_id in visiting:
+            start = visiting.index(task_id)
+            cycles.append([*visiting[start:], task_id])
+            return
+        if task_id in visited or task_id not in by_id:
+            return
+        visiting.append(task_id)
+        for dependency in by_id[task_id].get("depends_on", []):
+            if dependency in by_id:
+                visit(dependency)
+        visiting.pop()
+        visited.add(task_id)
+
+    for task_id in by_id:
+        visit(task_id)
+    return cycles
+
+
+def task_problems(relay_dir, task, known_tasks):
+    problems = []
+    task_id = task.get("id")
+    prefix = str(task_id or "unknown") + ": "
+    valid_id = True
+    try:
+        validate_task_id(task_id)
+    except (TypeError, ValueError) as error:
+        valid_id = False
+        problems.append(prefix + str(error))
+    if task.get("status") not in STATUSES:
+        problems.append(prefix + "invalid status {!r}".format(task.get("status")))
+    for field in ("title", "tier", "created_at", "updated_at"):
+        if not isinstance(task.get(field), str) or not task[field]:
+            problems.append(prefix + "{} must be non-empty text".format(field))
+    if not isinstance(task.get("history"), list):
+        problems.append(prefix + "history must be a list")
+    if valid_id and not os.path.exists(task_json_path(relay_dir, task_id)):
+        problems.append(prefix + "state filename does not match its id")
+    attempt = task.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        problems.append(prefix + "attempt must be a positive integer")
+    scopes = task.get("scope")
+    if not isinstance(scopes, list):
+        problems.append(prefix + "scope must be a list")
+    else:
+        try:
+            if normalize_scopes(scopes) != scopes:
+                problems.append(prefix + "scope is not canonical")
+        except ValueError as error:
+            problems.append(prefix + str(error))
+    dependencies = task.get("depends_on")
+    if not isinstance(dependencies, list) or not all(isinstance(item, str) for item in dependencies):
+        problems.append(prefix + "depends_on must be a list of task ids")
+    else:
+        if len(dependencies) != len(set(dependencies)):
+            problems.append(prefix + "duplicate dependencies")
+        if task_id in dependencies:
+            problems.append(prefix + "self dependency")
+        for dependency in dependencies:
+            if dependency not in known_tasks:
+                problems.append(prefix + "unknown dependency {}".format(dependency))
+            elif known_tasks[dependency].get("status") == "cancelled":
+                problems.append(prefix + "cancelled dependency {}".format(dependency))
+    runner = task.get("runner")
+    if task.get("status") == "running":
+        if not isinstance(runner, dict):
+            problems.append(prefix + "running task needs runner metadata")
+        else:
+            if not isinstance(runner.get("lease"), str) or not runner["lease"]:
+                problems.append(prefix + "running task lease is missing")
+            if not pid_alive(runner.get("pid")):
+                problems.append(prefix + "running worker is stale")
+    elif runner:
+        problems.append(prefix + "runner exists while task is not running")
+    if (valid_id and task.get("status") == "needs_review"
+            and not report_is_ready(report_path(
+                relay_dir, task_id, task.get("attempt", 1),
+            ))):
+        problems.append(prefix + "review report is missing or invalid")
+    violations = task.get("scope_violations")
+    if violations:
+        if task.get("status") not in ("blocked", "failed"):
+            problems.append(prefix + "scope violations require blocked or failed status")
+        if not task.get("scope_baseline"):
+            problems.append(prefix + "scope violation baseline is missing")
+    elif task.get("scope_baseline"):
+        problems.append(prefix + "scope baseline exists without violations")
+    return problems
+
+
+def cmd_validate(args):
+    relay_dir = require_relay_dir()
+    problems = []
+    root = project_root(relay_dir)
+    if not is_git_repo(root):
+        problems.append("repository: not a Git worktree")
+    else:
+        try:
+            top_level = git_checked(root, "rev-parse", "--show-toplevel").strip()
+            if os.path.realpath(root) != os.path.realpath(top_level):
+                problems.append("repository: Relay is not at the worktree root")
+            submodules = git_submodule_paths(root)
+            if submodules:
+                problems.append(
+                    "repository: tracked submodules are unsupported: "
+                    + ", ".join(submodules)
+                )
+        except RuntimeError as error:
+            problems.append("repository: " + str(error))
+    try:
+        config = load_config(relay_dir)
+        configured_limits(config)
+        sample = {"tier": "default"}
+        template = command_template(config, sample)
+        if not isinstance(template, str) or not template.strip():
+            problems.append("config: missing worker command")
+        else:
+            tokens = shlex.split(template)
+            placeholders = [token for token in tokens if token in ("{prompt}", "{prompt_file}")]
+            embedded = [
+                token for token in tokens
+                if ("{prompt}" in token or "{prompt_file}" in token)
+                and token not in ("{prompt}", "{prompt_file}")
+            ]
+            if len(placeholders) != 1:
+                problems.append("config: worker command needs one prompt placeholder")
+            if embedded:
+                problems.append("config: prompt placeholder must be a complete argument")
+    except (SystemExit, ValueError):
+        problems.append("config: invalid")
+    try:
+        active = load_all_tasks(relay_dir)
+        archived = load_archived_tasks(relay_dir)
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        say("PROBLEM: cannot read task state: {}".format(error))
+        raise SystemExit(1) from error
+    all_tasks = active + archived
+    known = {task.get("id"): task for task in all_tasks}
+    seen_ids = set()
+    seen_numbers: dict[int, str] = {}
+    for task in all_tasks:
+        task_id = task.get("id")
+        if not isinstance(task_id, str):
+            problems.append("task state has a non-string id")
+            continue
+        try:
+            validate_task_id(task_id)
+        except ValueError as error:
+            problems.append("{}: {}".format(task_id, error))
+            continue
+        if task_id in seen_ids:
+            problems.append("duplicate task id: {}".format(task_id))
+        seen_ids.add(task_id)
+        if TASK_ID_RE.fullmatch(task_id):
+            number = int(task_id[1:task_id.index("-")])
+            previous_id = seen_numbers.get(number)
+            if previous_id and previous_id != task_id:
+                problems.append(
+                    "task number {} is reused by {} and {}".format(
+                        number, previous_id, task_id,
+                    )
+                )
+            seen_numbers[number] = task_id
+    for task in active:
+        problems.extend(task_problems(relay_dir, task, known))
+        task_id = task.get("id")
+        if isinstance(task_id, str) and TASK_ID_RE.fullmatch(task_id):
+            if not os.path.exists(task_md_path(relay_dir, task_id)):
+                problems.append("{}: task spec is missing".format(task_id))
+    running = [task for task in active if task.get("status") == "running"]
+    for index, first in enumerate(running):
+        for second in running[index + 1:]:
+            if scopes_overlap(first.get("scope", []), second.get("scope", [])):
+                problems.append("running tasks {} and {} have overlapping scopes".format(
+                    first["id"], second["id"],
+                ))
+    for cycle in dependency_cycles(active):
+        problems.append("dependency cycle: " + " -> ".join(cycle))
+    if problems:
+        for problem in problems:
+            say("PROBLEM: " + problem)
+        raise SystemExit(1)
+    say("ok: %d active task(s)" % len(active))
+
+
+def cmd_archive(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    destination = archive_dir(relay_dir)
+    os.makedirs(destination, exist_ok=True)
+    with file_lock(lock_path(relay_dir, "scheduler")):
+        eligible = [
+            task for task in load_all_tasks(relay_dir)
+            if task["status"] in ("done", "cancelled")
+        ]
+        plan = []
+        for task in eligible:
+            task_id = task["id"]
+            for source in (
+                    task_json_path(relay_dir, task_id),
+                    task_md_path(relay_dir, task_id)):
+                if os.path.exists(source):
+                    plan.append((source, os.path.join(destination, os.path.basename(source))))
+            source_work = work_dir(relay_dir, task_id)
+            if os.path.isdir(source_work):
+                plan.append((source_work, os.path.join(destination, task_id + ".work")))
+        for _source, target in plan:
+            if os.path.lexists(target):
+                die("archive destination already exists: {}".format(target))
+        blocked_signals = {signal.SIGINT, signal.SIGTERM}
+        if hasattr(signal, "SIGHUP"):
+            blocked_signals.add(signal.SIGHUP)
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked_signals)
+        completed = []
+        try:
+            for source, target in plan:
+                shutil.move(source, target)
+                completed.append((source, target))
+        except BaseException:
+            for source, target in reversed(completed):
+                with suppress(OSError):
+                    shutil.move(target, source)
+            raise
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    say("archived %d task(s)" % len(eligible))
+
+
+# Memory
+
+def memory_path(relay_dir):
+    return os.path.join(relay_dir, "memory.md")
+
+
+def read_memory(relay_dir):
+    path = memory_path(relay_dir)
+    if not os.path.exists(path):
+        die("missing memory.md")
+    with open(path, encoding="utf-8") as source:
+        return path, source.read()
+
+
+def cmd_memory_index(args):
+    relay_dir = require_relay_dir()
+    _, text = read_memory(relay_dir)
+    audience = {"worker": "W", "orchestrator": "O"}.get(args.audience)
+    for line in text.splitlines():
+        match = re.fullmatch(r"- (M\d+) \[([WOB])\] (.+)", line.strip())
+        if match and (audience is None or match.group(2) in (audience, "B")):
+            say("{} [{}] {}".format(*match.groups()))
+
+
+def cmd_memory_show(args):
+    relay_dir = require_relay_dir()
+    _, text = read_memory(relay_dir)
+    match = re.search(
+        r"^### {} .*?(?=^### M|\Z)".format(re.escape(args.id)),
+        text, re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        die("no memory entry {}".format(args.id))
+        return
+    say(match.group(0).strip())
+
+
+def cmd_memory_add(args):
+    require_orchestrator()
+    relay_dir = require_relay_dir()
+    with file_lock(lock_path(relay_dir, "memory")):
+        path, text = read_memory(relay_dir)
+        tag = {"worker": "W", "orchestrator": "O", "both": "B"}[args.audience]
+        numbers = [int(value) for value in re.findall(r"^(?:- |### )M(\d+) \[", text, re.MULTILINE)] or [0]
+        memory_id = "M%03d" % (max(numbers) + 1)
+        index_line = "- {} [{}] {}".format(memory_id, tag, args.summary)
+        entry = "### {} [{}] {}\n{}\n".format(memory_id, tag, args.summary, args.body)
+        if "## Entries" in text:
+            head, marker, tail = text.partition("## Entries")
+            text = head.rstrip() + "\n" + index_line + "\n\n" + marker
+            if tail.strip():
+                text += tail.rstrip() + "\n\n"
+            else:
+                text += "\n\n"
+            text += entry
+        else:
+            text = text.rstrip() + "\n" + index_line + "\n\n## Entries\n\n" + entry
+        atomic_write(path, text)
+    say("added {}".format(memory_id))
+
+
+# Init and CLI
+
+def cmd_init(args):
+    require_orchestrator()
+    target = os.path.abspath(args.path or ".")
+    if not os.path.isdir(target):
+        die("no such directory: {}".format(target))
+    require_git_root(target)
+    source = script_dir()
+    relay_dir = os.path.join(target, RELAY_DIRNAME)
+    runtime_paths_are_safe(relay_dir)
+    static_files = ("relay", "orchestrator.md", "worker.md")
+    missing = [name for name in static_files if not os.path.exists(os.path.join(source, name))]
+    memory_source = os.path.join(source, "memory.md")
+    config_source = os.path.join(source, "config.example.toml")
+    if not os.path.exists(config_source):
+        config_source = os.path.join(source, "config.toml")
+    if not os.path.exists(memory_source):
+        missing.append("memory.md")
+    if not os.path.exists(config_source):
+        missing.append("config.example.toml or config.toml")
+    if missing:
+        die("framework files missing beside relay: {}".format(", ".join(missing)))
+    os.makedirs(relay_dir, exist_ok=True)
+    for name in static_files:
+        destination = os.path.join(relay_dir, name)
+        if os.path.exists(destination) and not args.force:
+            continue
+        if os.path.abspath(os.path.join(source, name)) != os.path.abspath(destination):
+            shutil.copy2(os.path.join(source, name), destination)
+    os.chmod(os.path.join(relay_dir, "relay"), 0o700)
+    destination_memory = os.path.join(relay_dir, "memory.md")
+    if not os.path.exists(destination_memory):
+        shutil.copy2(memory_source, destination_memory)
+    destination_config = os.path.join(relay_dir, "config.toml")
+    if not os.path.exists(destination_config):
+        shutil.copy2(config_source, destination_config)
+    for subdirectory in ("tasks", "work", "archive", ".locks"):
+        os.makedirs(os.path.join(relay_dir, subdirectory), exist_ok=True)
+    gitignore = os.path.join(target, ".gitignore")
+    existing = ""
+    if os.path.exists(gitignore):
+        with open(gitignore, encoding="utf-8") as source_file:
+            existing = source_file.read()
+    if RELAY_DIRNAME + "/" not in existing.splitlines():
+        updated = existing
+        if updated and not updated.endswith("\n"):
+            updated += "\n"
+        updated += RELAY_DIRNAME + "/\n"
+        atomic_write(gitignore, updated)
+        say("added .agent-relay/ to .gitignore")
+    say("initialized {}".format(relay_dir))
+    say("next: edit .agent-relay/config.toml, then ask your agent to read .agent-relay/orchestrator.md")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="relay", description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    command = commands.add_parser("init", help="install Agent Relay in a Git project")
+    command.add_argument("path", nargs="?", help="project directory (default: .)")
+    command.add_argument("--force", action="store_true", help="refresh relay and its manuals")
+    command.set_defaults(function=cmd_init)
+
+    task = commands.add_parser("task", help="manage tasks")
+    task_commands = task.add_subparsers(dest="task_command", required=True)
+
+    command = task_commands.add_parser("create", help="create a task")
+    command.add_argument("--title", required=True)
+    command.add_argument("--scope", action="append")
+    command.add_argument("--depends-on", action="append", dest="depends_on")
+    command.add_argument("--tier")
+    command.set_defaults(function=cmd_task_create)
+
+    command = task_commands.add_parser("list", help="list active tasks")
+    command.add_argument("--json", action="store_true")
+    command.set_defaults(function=cmd_task_list)
+
+    command = task_commands.add_parser("show", help="show task state")
+    command.add_argument("id")
+    command.set_defaults(function=cmd_task_show)
+
+    command = task_commands.add_parser("accept", help="approve reviewed work")
+    command.add_argument("id")
+    command.add_argument("--note")
+    command.set_defaults(function=cmd_task_accept)
+
+    command = task_commands.add_parser("return", help="queue another attempt")
+    command.add_argument("id")
+    command.add_argument("--reason", required=True)
+    command.set_defaults(function=cmd_task_return)
+
+    command = task_commands.add_parser("decide", help="answer a worker question")
+    command.add_argument("id")
+    command.add_argument("--answer", required=True)
+    command.set_defaults(function=cmd_task_decide)
+
+    command = task_commands.add_parser("cancel", help="cancel a task")
+    command.add_argument("id")
+    command.add_argument("--reason")
+    command.set_defaults(function=cmd_task_cancel)
+
+    command = task_commands.add_parser("finish", help="submit a worker result")
+    command.add_argument("id")
+    command.add_argument("--status", required=True, choices=WORKER_FINAL)
+    command.add_argument("--note")
+    command.add_argument("--changed", action="append", default=[])
+    command.set_defaults(function=cmd_task_finish)
+
+    command = task_commands.add_parser("unlock", help="clear a stale runner")
+    command.add_argument("id")
+    command.set_defaults(function=cmd_task_unlock)
+
+    command = commands.add_parser("run", help="run one non-conflicting task wave")
+    command.add_argument("ids", nargs="*")
+    command.add_argument("--max-parallel", type=int)
+    command.add_argument("--dry-run", action="store_true")
+    command.set_defaults(function=cmd_run)
+
+    command = commands.add_parser("status", help="show tasks needing attention")
+    command.set_defaults(function=cmd_status)
+
+    command = commands.add_parser("validate", help="check config and task state")
+    command.set_defaults(function=cmd_validate)
+
+    command = commands.add_parser("archive", help="archive done and cancelled tasks")
+    command.set_defaults(function=cmd_archive)
+
+    memory = commands.add_parser("memory", help="manage indexed project memory")
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+
+    command = memory_commands.add_parser("index", help="list memory entries")
+    command.add_argument("--for", dest="audience", choices=("worker", "orchestrator"))
+    command.set_defaults(function=cmd_memory_index)
+
+    command = memory_commands.add_parser("show", help="show one memory entry")
+    command.add_argument("id")
+    command.set_defaults(function=cmd_memory_show)
+
+    command = memory_commands.add_parser("add", help="add a durable project fact")
+    command.add_argument("--for", dest="audience", required=True,
+                         choices=("worker", "orchestrator", "both"))
+    command.add_argument("summary")
+    command.add_argument("body")
+    command.set_defaults(function=cmd_memory_add)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        args.function(args)
+    except (OSError, UnicodeDecodeError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        die(str(error))
+
+
+if __name__ == "__main__":
+    main()

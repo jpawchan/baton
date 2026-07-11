@@ -1,0 +1,21 @@
+# Agent Relay worker configuration
+
+[commands]
+# The placeholder must be one complete argument. Relay does not use a shell.
+worker = "hermes chat -Q -t terminal,file --source tool -q {prompt}"
+
+# Other noninteractive agent CLIs work when they accept a prompt argument.
+# Verify their flags locally before use.
+# worker = "codex exec {prompt}"
+
+# Optional commands for selected task tiers:
+# [tiers.cheap]
+# command = "hermes chat -Q -t terminal,file --source tool -m provider/model -q {prompt}"
+#
+# [tiers.premium]
+# command = "hermes chat -Q -t terminal,file --source tool -m provider/model -q {prompt}"
+
+[limits]
+max_parallel = 3
+# Minutes; 0 disables the timeout.
+worker_timeout_minutes = 60

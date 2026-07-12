@@ -1556,17 +1556,93 @@ class RelayTests(unittest.TestCase):
         self.assertIn("\nNext actions:\n", shown.stdout)
 
         closed = self.relay(
-            project, "orchestrator", "brief", "--phase", "close", check=True,
+            project, "orchestrator", "brief", "--phase", "close",
+            "--goal", "Finish\n\x1b[31mhandoff\x1b[0m context",
+            "--avoid", "Do not\n\x1b[33minherit\x1b[0m old goals",
+            "--avoid", "Keep locks unchanged",
+            "--avoid", "Preserve same-second dedupe",
+            "--avoid", "Avoid placeholder context",
+            "--avoid", "\x1b]0;title\x07" + "x" * 201,
+            check=True,
         )
         handoff = project / ".attention-relay" / "orchestrator-handoff.md"
         self.assertTrue(handoff.exists())
-        self.assertIn("consumed_at: (not yet)", handoff.read_text())
+        handoff_text = handoff.read_text()
+        self.assertIn("consumed_at: (not yet)", handoff_text)
+        self.assertIn("goal: Finish handoff context\n", handoff_text)
+        avoid_block = handoff_text.split("avoid:\n", 1)[1]
+        expected_avoids = [
+            "Do not inherit old goals", "Keep locks unchanged",
+            "Preserve same-second dedupe", "Avoid placeholder context",
+            "x" * 199 + "…",
+        ]
+        self.assertEqual(
+            avoid_block, "".join(f"- {note}\n" for note in expected_avoids),
+        )
+        self.assertNotIn("(fill in)", avoid_block)
         self.assertIn("Start a fresh session", closed.stdout)
         started = self.relay(
             project, "orchestrator", "brief", "--phase", "start", check=True,
         )
         self.assertIn("Current handoff:", started.stdout)
+        self.assertIn("goal: Finish handoff context", started.stdout)
+        for note in expected_avoids:
+            self.assertIn("- " + note, started.stdout)
         self.assertNotIn("consumed_at: (not yet)", handoff.read_text())
+
+    def test_close_brief_validates_required_and_phase_scoped_context(self):
+        project = self.make_project()
+        remediation = (
+            "error: `--phase close` requires a nonblank goal; "
+            "add `--goal TEXT`\n"
+        )
+        for extra in ([], ["--goal", " \n\t "]):
+            with self.subTest(extra=extra):
+                rejected = self.relay(
+                    project, "orchestrator", "brief", "--phase", "close", *extra,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertEqual(rejected.stderr, remediation)
+
+        too_many_args = [
+            item
+            for number in range(6)
+            for item in ("--avoid", f"note {number}")
+        ]
+        too_many = self.relay(
+            project, "orchestrator", "brief", "--phase", "close",
+            "--goal", "Continue the work", *too_many_args,
+        )
+        self.assertNotEqual(too_many.returncode, 0)
+        self.assertEqual(
+            too_many.stderr,
+            "error: at most 5 `--avoid` notes are allowed; consolidate them\n",
+        )
+
+        for phase in ("start", "plan", "run", "review"):
+            for flag, value in (("--goal", "next"), ("--avoid", "risk")):
+                with self.subTest(phase=phase, flag=flag):
+                    rejected = self.relay(
+                        project, "orchestrator", "brief", "--phase", phase,
+                        flag, value,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual(
+                        rejected.stderr,
+                        f"error: `{flag}` is valid only for the close phase\n",
+                    )
+
+        closed = self.relay(
+            project, "orchestrator", "brief", "--phase", "close",
+            "--goal", "g" * 201, check=True,
+        )
+        handoff = project / ".attention-relay" / "orchestrator-handoff.md"
+        goal_line = next(
+            line for line in handoff.read_text().splitlines() if line.startswith("goal: ")
+        )
+        self.assertEqual(goal_line, "goal: " + "g" * 199 + "…")
+        self.assertIn("avoid:\n- (fill in)\n", handoff.read_text())
+        self.assertIn(goal_line, closed.stdout)
 
     def test_handoff_start_and_close_lock_complete_update(self):
         module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_handoff_lock_probe")
@@ -1606,7 +1682,7 @@ class RelayTests(unittest.TestCase):
             ("exit", "orchestrator-handoff.lock"),
         ])
         events.clear()
-        module["orchestrator_close_brief"]("/relay", [])
+        module["orchestrator_close_brief"]("/relay", [], "next goal", [])
         self.assertEqual(events, [
             ("enter", "orchestrator-handoff.lock"), "read", "archive", "write",
             ("exit", "orchestrator-handoff.lock"),
@@ -1632,11 +1708,11 @@ class RelayTests(unittest.TestCase):
         globals_["now"] = lambda: boundary
         globals_["say"] = lambda *_args: None
 
-        module["orchestrator_close_brief"](runtime, [task])
+        module["orchestrator_close_brief"](runtime, [task], "next goal", [])
         first = handoff_path.read_text().split("done:\n", 1)[1].split(
             "decisions:\n", 1,
         )[0]
-        module["orchestrator_close_brief"](runtime, [task])
+        module["orchestrator_close_brief"](runtime, [task], "next goal", [])
         second = handoff_path.read_text().split("done:\n", 1)[1].split(
             "decisions:\n", 1,
         )[0]

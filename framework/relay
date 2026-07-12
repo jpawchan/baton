@@ -2026,13 +2026,11 @@ def orchestrator_run_brief(relay_dir, tasks):
         say("- none")
 
 
-def orchestrator_close_brief(relay_dir, tasks):
+def orchestrator_close_brief(relay_dir, tasks, goal, avoid_notes):
     with file_lock(lock_path(relay_dir, "orchestrator-handoff")):
         previous = read_handoff(relay_dir)
         previous_at = handoff_field(previous, "generated_at")
         previous_done = handoff_done_ids(previous)
-        goal = (handoff_field(previous, "goal", "(fill in)") or "(fill in)")
-        goal = goal.replace("\n", " ")[:240]
         done = {}
         decisions = []
         for task in tasks + load_archived_tasks(relay_dir):
@@ -2059,7 +2057,7 @@ def orchestrator_close_brief(relay_dir, tasks):
         for name, values in (
                 ("done", sorted(done.values())), ("decisions", decisions),
                 ("next", next_ids), ("unresolved", unresolved),
-                ("avoid", ["(fill in)"])):
+                ("avoid", avoid_notes or ["(fill in)"])):
             sections.append(name + ":")
             sections.extend("- " + line for line in limited_lines(values))
         content = "\n".join(sections) + "\n"
@@ -2074,6 +2072,21 @@ def cmd_orchestrator_brief(args):
     tasks = load_all_tasks(relay_dir)
     if args.include_log_tail and args.phase != "review":
         die("--include-log-tail is valid only for the review phase")
+    if args.goal is not None and args.phase != "close":
+        die("`--goal` is valid only for the close phase")
+    if args.avoid and args.phase != "close":
+        die("`--avoid` is valid only for the close phase")
+    if args.phase == "close":
+        if len(args.avoid) > 5:
+            die("at most 5 `--avoid` notes are allowed; consolidate them")
+        goal = flatten_bounded_text(args.goal, 200)
+        if not goal:
+            die("`--phase close` requires a nonblank goal; add `--goal TEXT`")
+        avoid_notes = [
+            note for note in (
+                flatten_bounded_text(value, 200) for value in args.avoid
+            ) if note
+        ]
     if args.phase == "review":
         if not args.id:
             die("review phase requires a task id")
@@ -2087,7 +2100,7 @@ def cmd_orchestrator_brief(args):
     elif args.phase == "run":
         orchestrator_run_brief(relay_dir, tasks)
     else:
-        orchestrator_close_brief(relay_dir, tasks)
+        orchestrator_close_brief(relay_dir, tasks, goal, avoid_notes)
 
 
 def claude_code_hook_fragment():
@@ -3556,6 +3569,14 @@ def build_parser():
     command.add_argument(
         "--include-log-tail", action="store_true",
         help="append a bounded sanitized log tail (review phase only)",
+    )
+    command.add_argument(
+        "--goal", metavar="TEXT",
+        help="set the next-session goal (required for the close phase)",
+    )
+    command.add_argument(
+        "--avoid", metavar="TEXT", action="append", default=[],
+        help="add a next-session avoid note (close phase only, repeatable)",
     )
     command.set_defaults(function=cmd_orchestrator_brief)
 

@@ -195,7 +195,8 @@ working tree; `accept`, `return`, and `cancel` do not apply or revert patches.
 
 `relay orchestrator brief --phase start|plan|run|review|close [ID]` is available
 only outside a leased worker. The orchestrator runs the matching brief before
-task creation, run, review/accept, and session close.
+task creation, run, review/accept, and session close. Close is invoked as
+`relay orchestrator brief --phase close --goal TEXT [--avoid TEXT]...`.
 
 - `start` prints a short role summary and a `Harness memory` notice of at most 12
   lines. The notice offers Claude Code's `"autoMemoryEnabled": false`,
@@ -250,12 +251,20 @@ task creation, run, review/accept, and session close.
   attempt-diff SHA-256, and sorted declared and observed changed-path lists. It
   atomically stores that manifest beside a new `Review token: <value>`; issuing
   another review brief replaces both token and manifest.
-- `close` uses the same dedicated handoff leaf lock to atomically write the
-  bounded `.attention-relay/orchestrator-handoff.md`, prints it, and reminds the
-  orchestrator to start a fresh session. The template carries the newest goal,
-  tasks accepted at or after the preceding handoff boundary except task ids
-  already in its `done` section, recent decision answers, queued and review
-  work, unresolved decisions, and an avoid placeholder.
+- `close` requires an explicit nonblank `--goal TEXT`; it never inherits a goal
+  from the preceding handoff. `--avoid TEXT` is optional and repeatable at most
+  five times. The goal and each avoid note are flattened with whitespace
+  collapsed, ANSI and C0/C1 controls removed, and output bounded to 200
+  characters. More than five avoid notes is an error that tells the caller to
+  consolidate them. `--goal` and `--avoid` are rejected for every non-close
+  phase, and a missing or sanitized-to-blank goal is rejected with an error that
+  says to add `--goal TEXT`. Close uses the same dedicated handoff leaf lock to
+  atomically write the bounded `.attention-relay/orchestrator-handoff.md`, prints
+  it, and reminds the orchestrator to start a fresh session. The template carries
+  the explicit goal, tasks accepted at or after the preceding handoff boundary
+  except task ids already in its `done` section, recent decision answers, queued
+  and review work, unresolved decisions, and one line per nonblank avoid note.
+  With no nonblank avoid notes, the avoid list contains one `(fill in)` line.
 
 With the default accept gate enabled, `task accept --brief TOKEN` requires the
 stored token for that task's current attempt. Under the task lock and before any

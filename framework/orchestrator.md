@@ -171,12 +171,19 @@ replaced, or already used.
 Before ending an orchestrator session, run:
 
 ```bash
-.attention-relay/relay orchestrator brief --phase close
+.attention-relay/relay orchestrator brief --phase close \
+  --goal "Continue with the next concrete objective" \
+  --avoid "Do not repeat a discarded approach"
 ```
 
 Relay writes a bounded `.attention-relay/orchestrator-handoff.md` from current
 state. Start a fresh session and run the start brief; it prints the handoff and
-marks it consumed without deleting it.
+marks it consumed without deleting it. Every close requires a nonblank explicit
+goal. Add at most five repeatable `--avoid` notes when useful. Relay flattens
+whitespace, removes controls and ANSI, and bounds the goal and each note to 200
+characters; it rejects close-only flags on other phases and asks callers with
+more than five notes to consolidate. With no avoid notes, the visible `(fill in)`
+placeholder remains.
 
 ## Failures
 
@@ -227,7 +234,8 @@ relay task list [--json]
 relay task show ID
 relay task capsule ID [--raw]
 relay hooks claude-code [--write]
-relay orchestrator brief --phase start|plan|run|close
+relay orchestrator brief --phase start|plan|run
+relay orchestrator brief --phase close --goal TEXT [--avoid TEXT]...
 relay orchestrator brief --phase review ID
 relay run [ID...] [--max-parallel N] [--dry-run]
 relay task accept ID --brief TOKEN [--note TEXT]

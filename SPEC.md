@@ -313,6 +313,16 @@ as `--brief TOKEN` and consumes it after successfully writing the result. A
 missing, wrong, replaced, replayed, different-attempt, or different-lease token
 is rejected with instructions to run a fresh report brief.
 
+For `needs_review`, a separate default-on report gate reads the report as UTF-8
+after finish-token identity checks and before writing the result or consuming the
+token. It requires the exact level-2 headings `Result`, `Changes`,
+`Verification`, and `Decisions and risks` outside triple-backtick or triple-tilde
+fences. Result, Changes, and Verification bodies must be nonblank, and Result's
+first nonblank body line must exactly equal the submitted status. Missing,
+non-regular, undecodable, or malformed reports are rejected with a precise
+problem and instructions to correct the report and refinish with the same token.
+`needs_decision`, `blocked`, and `failed` reports are never structure-checked.
+
 Each worker runs in a separate process group. Relay captures combined output,
 enforces `worker_timeout_minutes`, and terminates process groups on timeout or
 `SIGINT`, `SIGTERM`, or `SIGHUP` interruption. It signals every active group
@@ -386,6 +396,7 @@ worker_timeout_minutes = 60
 
 [gates]
 finish_requires_brief = true
+report_requires_sections = true
 accept_requires_brief = true
 ```
 
@@ -397,10 +408,11 @@ configured model and reasoning.
 defaults to 4000 characters. The timeout is a non-negative number in minutes;
 zero disables it.
 
-Both gate values must be booleans and default to `true` when absent.
+All gate values must be booleans and default to `true` when absent.
 `finish_requires_brief = false` lets `task finish` work without a token;
+`report_requires_sections = false` restores free-form non-empty review reports;
 `accept_requires_brief = false` lets `task accept` work without a review token.
-Each disabled gate ignores its corresponding `--brief` argument.
+Each disabled token gate ignores its corresponding `--brief` argument.
 
 Optional `[tiers.<name>].command` values override the default worker command for
 a task with that tier. An unknown tier uses the default command.
@@ -445,9 +457,11 @@ and stub workers. It covers:
   changed-path attribution;
 - parallel workers, serialized run processes, leases, and duplicate-claim
   prevention;
-- worker and orchestrator phase briefs, finish/review tokens and gates, handoff,
-  stdout next-action capsules, reports, worker results, lifecycle guards,
-  return, decide, and accept;
+- worker and orchestrator phase briefs, finish/review tokens and gates, structured
+  review-report validation (including fences, CRLF, unreadable files, status
+  matching, retry with the same token, and gate bypasses), handoff, stdout
+  next-action capsules, worker results, lifecycle guards, return, decide, and
+  accept;
 - attempt-local Git diffs in clean, dirty, and unborn worktrees;
 - direct command execution without a shell;
 - process-group timeout, batched `SIGINT`/`SIGTERM` cleanup, and non-UTF-8

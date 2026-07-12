@@ -35,5 +35,7 @@ worker_timeout_minutes = 60
 [gates]
 # Require a fresh report-phase brief token before a worker can finish.
 finish_requires_brief = true
+# Require needs_review reports to use the exact worker.md section structure.
+report_requires_sections = true
 # Require a fresh review-phase brief token before an orchestrator can accept.
 accept_requires_brief = true

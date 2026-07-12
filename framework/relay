@@ -242,6 +242,13 @@ def configured_finish_requires_brief(config):
     return required
 
 
+def configured_report_requires_sections(config):
+    required = cfg_get(config, "gates.report_requires_sections", True)
+    if not isinstance(required, bool):
+        raise ValueError("report_requires_sections must be true or false")
+    return required
+
+
 def configured_accept_requires_brief(config):
     required = cfg_get(config, "gates.accept_requires_brief", True)
     if not isinstance(required, bool):
@@ -390,6 +397,76 @@ def report_is_ready(path):
         and not os.path.islink(path)
         and os.path.getsize(path) > 0
     )
+
+
+REPORT_SECTIONS = ("Result", "Changes", "Verification", "Decisions and risks")
+
+
+def report_section_problems(text, expected_status):
+    """Return problems with the worker report template, without changing state."""
+    sections = {name: None for name in REPORT_SECTIONS}
+    current = None
+    fenced = False
+    for line in text.splitlines():
+        if line.startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and (line == "##" or line.startswith("## ")):
+            name = line[3:] if line.startswith("## ") else ""
+            if name in sections:
+                if sections[name] is None:
+                    sections[name] = []
+                current = name
+            else:
+                current = None
+            continue
+        if current is not None:
+            sections[current].append(line)
+
+    problems = []
+    for name in REPORT_SECTIONS:
+        if sections[name] is None:
+            problems.append("missing required report section `## {}`".format(name))
+    for name in REPORT_SECTIONS[:3]:
+        body = sections[name]
+        if body is not None and not any(line.strip() for line in body):
+            problems.append("report section `## {}` has an empty body".format(name))
+    result = sections["Result"]
+    if result is not None:
+        first = next((line.strip() for line in result if line.strip()), None)
+        if first is not None and first != expected_status:
+            problems.append(
+                "report section `## Result` starts with {!r}, not submitted status {!r}".format(
+                    first, expected_status,
+                )
+            )
+    return problems
+
+
+def read_report_for_section_gate(path):
+    """Read a non-symlink regular report as UTF-8, returning text or one problem."""
+    if not os.path.lexists(path):
+        return None, "report file is missing"
+    if os.path.islink(path):
+        return None, "report file is not a regular file"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None, "report file is unreadable"
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None, "report file is not a regular file"
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None
+            data = source.read()
+    except OSError:
+        return None, "report file is unreadable"
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        return data.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return None, "report file is not valid UTF-8"
 
 
 def read_json(path):
@@ -1155,6 +1232,7 @@ def cmd_task_finish(args):
         die("a worker may finish only its assigned task: {}".format(worker_id))
     config = load_config(relay_dir)
     finish_requires_brief = configured_finish_requires_brief(config)
+    report_requires_sections = configured_report_requires_sections(config)
     with task_lock(relay_dir, args.id):
         task = load_task(relay_dir, args.id)
         attempt = task.get("attempt", 1)
@@ -1186,8 +1264,22 @@ def cmd_task_finish(args):
                     )
                 )
         report = report_path(relay_dir, task["id"], attempt)
-        if args.status == "needs_review" and not report_is_ready(report):
-            die("write a non-empty regular report before requesting review")
+        if args.status == "needs_review":
+            if report_requires_sections:
+                report_text, read_problem = read_report_for_section_gate(report)
+                problems = (
+                    [read_problem] if read_problem
+                    else report_section_problems(report_text, args.status)
+                )
+                if problems:
+                    die(
+                        "report rejected: {}; fix the report to match the worker.md template, "
+                        "then rerun `task finish` with the same `--brief` token".format(
+                            "; ".join(problems),
+                        )
+                    )
+            elif not report_is_ready(report):
+                die("write a non-empty regular report before requesting review")
         path = result_path(relay_dir, task["id"], attempt)
         if os.path.exists(path):
             die("final status was already submitted for this attempt")
@@ -1220,7 +1312,7 @@ PHASE_CHECKLISTS = {
     ),
     "report": (
         "## Report phase checklist\n"
-        "- Write the report with Result, Changes, Verification, and Decisions and risks.\n"
+        "- Use the exact level-2 Result, Changes, Verification, and Decisions and risks sections from worker.md.\n"
         "- Declare every exact project-relative changed path with repeated --changed PATH.\n"
         "- Use only needs_review, needs_decision, blocked, or failed."
     ),
@@ -2501,6 +2593,7 @@ def cmd_validate(args):
         configured_limits(config)
         capsule_max_chars = configured_capsule_max_chars(config)
         configured_finish_requires_brief(config)
+        configured_report_requires_sections(config)
         configured_accept_requires_brief(config)
         sample = {"tier": "default"}
         template = command_template(config, sample)

@@ -53,7 +53,9 @@ Timeout, interruption, and runner or launch errors still fail the attempt.
 
 ## Report
 
-Keep the report short:
+Keep the report short. For `needs_review`, Relay requires all four exact level-2
+headings below, nonblank Result, Changes, and Verification bodies, and a Result
+body whose first nonblank line exactly matches the submitted status:
 
 ```markdown
 # <task-id> report

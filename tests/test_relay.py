@@ -78,8 +78,11 @@ brief = subprocess.run(
 )
 token = next(line.removeprefix("Brief token: ") for line in brief.stdout.splitlines()
              if line.startswith("Brief token: "))
-report.write_text(f"# {tid} report\n\nResult: needs_review\n")
 status = os.environ.get("SUBMIT_STATUS", "needs_review")
+report.write_text(
+    f"# {tid} report\n\n## Result\n{status}\n\n## Changes\n- updated task output\n\n"
+    "## Verification\n- worker completed\n\n## Decisions and risks\n- none\n"
+)
 finish = [sys.executable, str(rd / "relay"), "task", "finish", tid,
           "--status", status, "--brief", token]
 for path in changed:
@@ -120,7 +123,10 @@ brief = subprocess.run(
 )
 token = next(line.removeprefix("Brief token: ") for line in brief.stdout.splitlines()
              if line.startswith("Brief token: "))
-report.write_text("# no-change report\n")
+report.write_text(
+    "# no-change report\n\n## Result\nneeds_review\n\n## Changes\n- no changes\n\n"
+    "## Verification\n- worker completed\n\n## Decisions and risks\n- none\n"
+)
 subprocess.run([sys.executable, str(rd / "relay"), "task", "finish", tid,
                 "--status", "needs_review", "--brief", token], cwd=root, check=True)
 '''
@@ -204,7 +210,10 @@ brief = subprocess.run(
 )
 token = next(line.removeprefix("Brief token: ") for line in brief.stdout.splitlines()
              if line.startswith("Brief token: "))
-report.write_text("# staged report\n")
+report.write_text(
+    "# staged report\n\n## Result\nneeds_review\n\n## Changes\n- staged file\n\n"
+    "## Verification\n- worker completed\n\n## Decisions and risks\n- none\n"
+)
 subprocess.run([sys.executable, str(rd / "relay"), "task", "finish", tid,
                 "--status", "needs_review", "--brief", token,
                 "--changed", "new/staged.txt"],
@@ -359,6 +368,22 @@ class RelayTests(unittest.TestCase):
             if line.startswith("Brief token: ")
         )
         return brief, token
+
+    def report_text(self, status="needs_review", newline="\n"):
+        lines = [
+            "# task report", "", "## Result", status, "", "## Changes",
+            "- test changes", "", "## Verification", "- test verification",
+            "", "## Decisions and risks", "- none", "",
+        ]
+        return newline.join(lines)
+
+    def prepare_finish(self, name):
+        project = self.make_project(name)
+        task_id = self.create_task(project, name)
+        env = self.lease_task(project, task_id, name + "-lease")
+        _brief, token = self.report_brief_token(project, task_id, env)
+        work = project / ".attention-relay" / "work" / task_id
+        return project, task_id, env, work / "attempt-1.report.md", token
 
     def review_brief_token(self, project, task_id, env=None):
         brief = self.relay(
@@ -647,7 +672,7 @@ class RelayTests(unittest.TestCase):
         self.assertIn("## Report phase checklist", second_brief.stdout)
         self.assertNotEqual(first_token, second_token)
         report = runtime / "work" / task_id / "attempt-1.report.md"
-        report.write_text("# brief gate report\n")
+        report.write_text(self.report_text())
 
         finish = ["task", "finish", task_id, "--status", "needs_review"]
         for token in (None, "foreign-token", first_token):
@@ -678,10 +703,149 @@ class RelayTests(unittest.TestCase):
             project / ".attention-relay" / "work" / task_id
             / "attempt-1.report.md"
         )
-        report.write_text("# gate off report\n")
+        report.write_text(self.report_text())
         self.relay(
             project, "task", "finish", task_id, "--status", "needs_review",
             env=env, check=True,
+        )
+
+    def test_report_missing_heading_preserves_token_and_same_token_refinishes(self):
+        project, task_id, env, report, token = self.prepare_finish("missing-heading")
+        report.write_text(self.report_text().replace(
+            "\n## Decisions and risks\n- none\n", "\n",
+        ))
+        work = report.parent
+        token_path = work / "finish-brief-token.json"
+        result_path = work / "attempt-1.result.json"
+        state_path = project / ".attention-relay" / "tasks" / f"{task_id}.json"
+        state_before = state_path.read_bytes()
+        token_before = token_path.read_bytes()
+        command = [
+            "task", "finish", task_id, "--status", "needs_review",
+            "--brief", token,
+        ]
+
+        rejected = self.relay(project, *command, env=env)
+        self.assertEqual(rejected.returncode, 1)
+        self.assertEqual(
+            rejected.stderr,
+            "error: report rejected: missing required report section "
+            "`## Decisions and risks`; fix the report to match the worker.md template, "
+            "then rerun `task finish` with the same `--brief` token\n",
+        )
+        self.assertEqual(state_path.read_bytes(), state_before)
+        self.assertEqual(token_path.read_bytes(), token_before)
+        self.assertFalse(result_path.exists())
+
+        report.write_text(self.report_text())
+        self.relay(project, *command, env=env, check=True)
+        self.assertFalse(token_path.exists())
+        self.assertEqual(json.loads(result_path.read_text())["status"], "needs_review")
+
+    def test_report_empty_verification_body_is_rejected(self):
+        project, task_id, env, report, token = self.prepare_finish("empty-verification")
+        report.write_text(self.report_text().replace("- test verification", ""))
+        rejected = self.relay(
+            project, "task", "finish", task_id, "--status", "needs_review",
+            "--brief", token, env=env,
+        )
+        self.assertEqual(rejected.returncode, 1)
+        self.assertIn("report section `## Verification` has an empty body", rejected.stderr)
+        self.assertIn("same `--brief` token", rejected.stderr)
+
+    def test_report_result_must_match_submitted_status(self):
+        project, task_id, env, report, token = self.prepare_finish("result-mismatch")
+        report.write_text(self.report_text(status="failed"))
+        rejected = self.relay(
+            project, "task", "finish", task_id, "--status", "needs_review",
+            "--brief", token, env=env,
+        )
+        self.assertEqual(rejected.returncode, 1)
+        self.assertIn(
+            "report section `## Result` starts with 'failed', not submitted status "
+            "'needs_review'",
+            rejected.stderr,
+        )
+
+    def test_report_heading_inside_fence_does_not_count(self):
+        project, task_id, env, report, token = self.prepare_finish("fenced-heading")
+        report.write_text(
+            "# task report\n\n## Result\nneeds_review\n\n## Changes\n- changes\n\n"
+            "```markdown\n## Verification\n- fake verification\n```\n\n"
+            "## Decisions and risks\n- none\n"
+        )
+        rejected = self.relay(
+            project, "task", "finish", task_id, "--status", "needs_review",
+            "--brief", token, env=env,
+        )
+        self.assertEqual(rejected.returncode, 1)
+        self.assertIn("missing required report section `## Verification`", rejected.stderr)
+
+    def test_crlf_structured_report_is_accepted(self):
+        project, task_id, env, report, token = self.prepare_finish("crlf-report")
+        report.write_bytes(self.report_text(newline="\r\n").encode("utf-8"))
+        self.relay(
+            project, "task", "finish", task_id, "--status", "needs_review",
+            "--brief", token, env=env, check=True,
+        )
+
+    def test_report_section_gate_off_accepts_free_form_report(self):
+        project, task_id, env, report, token = self.prepare_finish("section-gate-off")
+        config = project / ".attention-relay" / "config.toml"
+        config.write_text(config.read_text().replace(
+            "report_requires_sections = true", "report_requires_sections = false",
+        ))
+        report.write_text("free-form review report\n")
+        self.relay(
+            project, "task", "finish", task_id, "--status", "needs_review",
+            "--brief", token, env=env, check=True,
+        )
+
+    def test_non_review_statuses_skip_report_section_gate(self):
+        for status in ("needs_decision", "blocked", "failed"):
+            with self.subTest(status=status):
+                project, task_id, env, _report, token = self.prepare_finish(
+                    "unstructured-" + status.replace("_", "-"),
+                )
+                self.relay(
+                    project, "task", "finish", task_id, "--status", status,
+                    "--brief", token, env=env, check=True,
+                )
+
+    def test_unreadable_review_reports_reject_without_consuming_token(self):
+        for kind in ("missing", "directory", "bad-utf8"):
+            with self.subTest(kind=kind):
+                project, task_id, env, report, token = self.prepare_finish(
+                    "unreadable-" + kind,
+                )
+                if kind == "directory":
+                    report.mkdir()
+                    expected = "report file is not a regular file"
+                elif kind == "bad-utf8":
+                    report.write_bytes(b"\xff\xfe")
+                    expected = "report file is not valid UTF-8"
+                else:
+                    expected = "report file is missing"
+                token_path = report.parent / "finish-brief-token.json"
+                rejected = self.relay(
+                    project, "task", "finish", task_id, "--status", "needs_review",
+                    "--brief", token, env=env,
+                )
+                self.assertEqual(rejected.returncode, 1)
+                self.assertIn("report rejected: " + expected, rejected.stderr)
+                self.assertTrue(token_path.exists())
+
+    def test_non_boolean_report_section_gate_fails_validate(self):
+        project = self.make_project("invalid-report-gate")
+        config = project / ".attention-relay" / "config.toml"
+        config.write_text(config.read_text().replace(
+            "report_requires_sections = true", 'report_requires_sections = "yes"',
+        ))
+        validation = self.relay(project, "validate")
+        self.assertEqual(validation.returncode, 1)
+        self.assertIn(
+            "config: report_requires_sections must be true or false",
+            validation.stdout,
         )
 
     def test_return_then_retry_invalidates_report_brief_token(self):

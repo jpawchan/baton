@@ -103,6 +103,11 @@ worker in the wave exits, captures attempt-local Git diffs, compares each
 worker's declared changed paths with its scoped diff, and blocks the wave if
 files changed outside its combined scopes.
 
+By default, `task finish --status needs_review` also gates submission on the
+exact report sections in `worker.md`. A malformed report is rejected before the
+result is written or the finish token is consumed, so the worker can correct it
+and refinish with the same token. Other worker-final statuses bypass this gate.
+
 ## Review
 
 For each task in `needs_review`, issue a fresh review brief:

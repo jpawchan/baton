@@ -207,7 +207,21 @@ task creation, run, review/accept, and session close. Close is invoked as
   `--safe-mode` drops user config and `hermes memory reset` is destructive, and
   says framework workers are already clean by default. The orchestrator relays
   these choices in its first response and never auto-applies one. Start also
-  prints the current handoff when present, task counts, unresolved
+  checks the optional conventional tier tables `[tiers.hard]`, `[tiers.medium]`,
+  and `[tiers.easy]`. While any are absent, it prints exactly one `Difficulty
+  levels:` section of at most 12 lines naming configured and missing conventional
+  levels. The section directs the orchestrator to ask the user in its first
+  response which model, and optionally provider, each missing level should use.
+  It includes commented, copy-ready TOML tables for only the missing levels;
+  stripping each leading `# ` produces valid TOML. Every command uses the
+  memory-clean Hermes pattern with `-m MODEL` and optional `--provider PROVIDER`
+  placeholders. It notes that per-level `worker_timeout_minutes` and
+  `capsule_max_chars` are optional, that Hermes has no per-invocation reasoning
+  override so reasoning follows the harness's own configuration, and that these
+  level names are optional conventions. The section is absent only when all
+  three tables exist. Relay never prompts interactively, registers a level,
+  chooses a fallback, schedules from these names, or writes configuration. Start
+  also prints the current handoff when present, task counts, unresolved
   decision/review ids, and one recommended next command. Directly beneath the
   ids-only decision line it prints at most two available worker questions,
   flattened to one line, stripped of ANSI and C0/C1 controls, bounded to 160
@@ -311,7 +325,11 @@ write-capable lock and creates or changes no runtime file.
 block for `default` followed by each configured tier in sorted name order. Each
 block shows only the command executable (`argv[0]`, never its flags or remaining
 arguments), whether the command comes from `default` or the tier, the effective
-worker timeout in minutes, and the effective capsule budget in characters.
+worker timeout in minutes, and the effective capsule budget in characters. If
+any of the optional conventional `hard`, `medium`, and `easy` tables is absent,
+it appends exactly one line `Conventional levels missing: <comma-separated
+names>` in hard, medium, easy order. The line is omitted when all three are
+configured; every tier block is otherwise byte-unchanged.
 
 ## Optional Claude Code integration
 
@@ -332,9 +350,10 @@ The matcher-free `SessionStart` entry fires at startup and after automatic or
 manual compaction; post-compaction stdin carries `"source": "compact"`. Claude
 adds SessionStart stdout back to session context. `relay hook-event
 session-start` normally emits the same plain stdout as the start-phase
-orchestrator brief. For a compact source, it prefixes that brief with the single
-line `attention-relay: context was compacted; state re-injected below.` so the
-new context is explicitly re-grounded. PreCompact stdout does not reach Claude's
+orchestrator brief. For a compact source, it omits the `Difficulty levels:`
+section and prefixes the otherwise unchanged brief with the single line
+`attention-relay: context was compacted; state re-injected below.` so the new
+context is explicitly re-grounded. PreCompact stdout does not reach Claude's
 summarizer or the resulting context, so this integration intentionally has no
 PreCompact hook and re-injects state through the post-compaction SessionStart.
 
@@ -531,7 +550,9 @@ tier inherits `[commands].worker`. Tier commands obey the same one-placeholder
 rule as the default command. Tier limits obey the same type and range rules as
 their global counterparts. `validate` checks every configured tier, including
 unused tiers. `relay tiers` displays all effective settings without exposing
-command flags.
+command flags. `hard`, `medium`, and `easy` have no special validation or
+scheduling semantics: they are ordinary strict opt-in tiers whose names are
+used only by the onboarding section and missing-level hint.
 
 ## Memory
 

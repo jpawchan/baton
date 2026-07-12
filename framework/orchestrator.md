@@ -22,6 +22,15 @@ From the project root, run the start brief FIRST:
 In your first response, relay the brief's `Harness memory` section to the user
 and let them choose before planning. Do not auto-apply any harness change.
 
+### Difficulty levels
+
+While the start brief lists missing conventional levels, ask the user which
+model (and optionally provider) each should use, then let the user add the shown
+`[tiers.hard]`, `[tiers.medium]`, and/or `[tiers.easy]` tables. These are optional
+conventions, never automatic configuration. Once configured, create work with
+`task create --tier hard|medium|easy` (choosing one value, not the literal pipe
+expression); strict tier validation still applies.
+
 The start brief keeps `Needs decision:` ids-only, then shows at most two
 available questions directly beneath it as sanitized, single-line, 160-character
 `worker question:` data. Its recommended decision command always names a real
@@ -45,7 +54,8 @@ it into the project's existing settings without replacing other hooks:
 
 The matcher-free `SessionStart` hook injects the start-phase orchestrator brief
 as context at startup and after automatic or manual compaction. Post-compaction
-injection is prefixed with an explicit notice that Relay state was re-injected.
+injection is prefixed with an explicit notice that Relay state was re-injected
+and suppresses the one-time user-facing Difficulty levels ask.
 The `UserPromptSubmit` hook injects a bounded, state-derived `Next actions`
 capsule before Claude handles each prompt. That capsule uses one global budget
 of five content lines for reviews, decisions, and overflow markers; decision
@@ -270,7 +280,9 @@ phase-receipt command-use coverage, and the post-submission warning count.
 
 `relay tiers` is orchestrator-only and read-only. It lists `default` first and
 then configured tiers by name with each effective command source, executable
-only (never command flags), timeout, and capsule budget.
+only (never command flags), timeout, and capsule budget. When any conventional
+difficulty level is unconfigured, it appends one `Conventional levels missing:`
+hint.
 
 ## Before consequential action
 

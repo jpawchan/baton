@@ -18,6 +18,23 @@ worker = "hermes chat -Q -t terminal,file --source tool --ignore-rules -q {promp
 # Memory-clean Claude Code worker:
 # worker = "claude -p --bare {prompt}"
 
+# Optional conventional difficulty levels. Choose each model/provider explicitly;
+# remove `--provider provider` when `-m model` already identifies the provider.
+# [tiers.hard]
+# command = "hermes chat -Q -t terminal,file --source tool --ignore-rules -m model --provider provider -q {prompt}"
+# worker_timeout_minutes = 90
+# capsule_max_chars = 6000
+#
+# [tiers.medium]
+# command = "hermes chat -Q -t terminal,file --source tool --ignore-rules -m model --provider provider -q {prompt}"
+#
+# [tiers.easy]
+# command = "hermes chat -Q -t terminal,file --source tool --ignore-rules -m model --provider provider -q {prompt}"
+# worker_timeout_minutes = 30
+# capsule_max_chars = 3000
+#
+# These names are optional conventions, not automatically registered tiers.
+
 # Optional commands for selected task tiers:
 # [tiers.cheap]
 # command = "hermes chat -Q -t terminal,file --source tool --ignore-rules -m provider/model -q {prompt}"

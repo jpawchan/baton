@@ -41,6 +41,7 @@ HOOK_OUTPUT_MAX_CHARS = 9000
 CLAUDE_COMPACT_NOTICE = (
     "attention-relay: context was compacted; state re-injected below."
 )
+CONVENTIONAL_LEVELS = ("hard", "medium", "easy")
 CLAUDE_HOOK_COMMANDS = {
     "SessionStart": '"$CLAUDE_PROJECT_DIR"/.attention-relay/relay hook-event session-start',
     "UserPromptSubmit": '"$CLAUDE_PROJECT_DIR"/.attention-relay/relay hook-event user-prompt-submit',
@@ -288,6 +289,40 @@ def configured_tier_names(config):
     if "default" in tiers:
         raise ValueError("tier name 'default' is reserved")
     return ["default", *sorted(tiers)]
+
+
+def conventional_level_names(config):
+    configured = [
+        name for name in CONVENTIONAL_LEVELS
+        if cfg_get(config, "tiers." + name) is not None
+    ]
+    missing = [name for name in CONVENTIONAL_LEVELS if name not in configured]
+    return configured, missing
+
+
+def difficulty_levels_lines(config):
+    configured, missing = conventional_level_names(config)
+    if not missing:
+        return []
+    configured_text = ", ".join(configured) or "none"
+    lines = [
+        "Difficulty levels:",
+        "- Configured conventional levels: {}; missing: {}.".format(
+            configured_text, ", ".join(missing),
+        ),
+        "- In your first response, ask the USER which model (and optionally provider) each missing level should use.",
+        "- Copy-ready TOML for only the missing levels (strip `# `; replace MODEL and optional PROVIDER, or remove `--provider PROVIDER`); per-level worker_timeout_minutes/capsule_max_chars are optional:",
+    ]
+    for name in missing:
+        lines.extend((
+            "# [tiers.{}]".format(name),
+            '# command = "hermes chat -Q -t terminal,file --source tool --ignore-rules -m MODEL --provider PROVIDER -q {prompt}"',
+        ))
+    lines.extend((
+        "- Hermes exposes no per-invocation reasoning override; reasoning follows the harness's own config.",
+        "- These levels are optional conventions; Relay never configures or selects them automatically.",
+    ))
+    return lines
 
 
 def unknown_tier_error(config, name):
@@ -1871,7 +1906,8 @@ def limited_lines(values, limit=8):
     return rendered or ["(none)"]
 
 
-def orchestrator_start_brief(relay_dir, tasks, consume_handoff=True):
+def orchestrator_start_brief(
+        relay_dir, tasks, consume_handoff=True, include_levels_ask=True):
     say("Orchestrator role:")
     say("- Translate the user goal into small, observable tasks.")
     say("- Run only non-conflicting work and resolve worker decisions.")
@@ -1885,6 +1921,12 @@ def orchestrator_start_brief(relay_dir, tasks, consume_handoff=True):
     say("- Do not use --safe-mode: it drops user config, including the configured model.")
     say("- `hermes memory reset` is destructive.")
     say("- Workers launched by this framework are already clean by default via the config worker command.")
+    if include_levels_ask:
+        level_lines = difficulty_levels_lines(load_config(relay_dir))
+        if level_lines:
+            say("\n" + level_lines[0])
+            for line in level_lines[1:]:
+                say(line)
     if consume_handoff:
         with file_lock(lock_path(relay_dir, "orchestrator-handoff")):
             handoff = read_handoff(relay_dir)
@@ -2362,7 +2404,10 @@ def cmd_hook_event(args):
                 return
             tasks = load_all_tasks(relay_dir)
             if args.name == "session-start":
-                orchestrator_start_brief(relay_dir, tasks, consume_handoff=False)
+                orchestrator_start_brief(
+                    relay_dir, tasks, consume_handoff=False,
+                    include_levels_ask=hook_input.get("source") != "compact",
+                )
             else:
                 context = "attention-relay state:\n" + render_next_actions(relay_dir)
         if args.name == "session-start":
@@ -3090,6 +3135,9 @@ def cmd_tiers(args):
     except ValueError as error:
         die(str(error))
     say("\n\n".join(blocks))
+    _configured, missing = conventional_level_names(config)
+    if missing:
+        say("Conventional levels missing: " + ", ".join(missing))
 
 
 def cmd_stats(args):

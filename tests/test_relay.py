@@ -798,6 +798,81 @@ class RelayTests(unittest.TestCase):
         )
         self.assertNotIn("relay task decide +1 more", started.stdout)
 
+    def test_start_brief_difficulty_levels_are_missing_only_parseable_and_bounded(self):
+        project = self.make_project()
+
+        def difficulty_section(output):
+            marker = "\nDifficulty levels:\n"
+            self.assertEqual(output.count(marker), 1)
+            body = output.split(marker, 1)[1].split("\n\n", 1)[0]
+            return ["Difficulty levels:", *body.splitlines()]
+
+        started = self.relay(
+            project, "orchestrator", "brief", "--phase", "start", check=True,
+        ).stdout
+        section = difficulty_section(started)
+        self.assertLessEqual(len(section), 12)
+        self.assertIn(
+            "- Configured conventional levels: none; missing: hard, medium, easy.",
+            section,
+        )
+        self.assertTrue(any(
+            "ask the USER" in line and "model (and optionally provider)" in line
+            for line in section
+        ))
+        snippet = "\n".join(
+            line.removeprefix("# ") for line in section if line.startswith("# ")
+        )
+        parsed = tomllib.loads(snippet)
+        self.assertEqual(list(parsed["tiers"]), ["hard", "medium", "easy"])
+        for tier in parsed["tiers"].values():
+            command = tier["command"]
+            self.assertIn("--ignore-rules", command)
+            self.assertIn("-m MODEL", command)
+            self.assertIn("--provider PROVIDER", command)
+            self.assertIn("-q {prompt}", command)
+        self.assertTrue(any(
+            "worker_timeout_minutes/capsule_max_chars are optional" in line
+            for line in section
+        ))
+        self.assertTrue(any(
+            "no per-invocation reasoning override" in line for line in section
+        ))
+        self.assertTrue(any("optional conventions" in line for line in section))
+
+        config = project / ".attention-relay" / "config.toml"
+        config.write_text(config.read_text() + (
+            "\n[tiers.hard]\ncapsule_max_chars = 5000\n"
+            "\n[tiers.custom]\ncapsule_max_chars = 4500\n"
+        ))
+        partial = self.relay(
+            project, "orchestrator", "brief", "--phase", "start", check=True,
+        ).stdout
+        partial_section = difficulty_section(partial)
+        self.assertLessEqual(len(partial_section), 12)
+        self.assertIn(
+            "- Configured conventional levels: hard; missing: medium, easy.",
+            partial_section,
+        )
+        partial_snippet = "\n".join(
+            line.removeprefix("# ")
+            for line in partial_section if line.startswith("# ")
+        )
+        self.assertEqual(
+            list(tomllib.loads(partial_snippet)["tiers"]), ["medium", "easy"],
+        )
+        self.assertNotIn("[tiers.hard]", partial_snippet)
+        self.assertNotIn("tiers.custom", "\n".join(partial_section))
+
+        config.write_text(config.read_text() + (
+            "\n[tiers.medium]\nworker_timeout_minutes = 45\n"
+            "\n[tiers.easy]\nworker_timeout_minutes = 20\n"
+        ))
+        complete = self.relay(
+            project, "orchestrator", "brief", "--phase", "start", check=True,
+        ).stdout
+        self.assertNotIn("Difficulty levels:", complete)
+
     def test_worker_role_and_live_runner_guards(self):
         project = self.make_project()
         worker = self.write_worker(GOOD_WORKER)
@@ -1675,7 +1750,7 @@ class RelayTests(unittest.TestCase):
             project, "orchestrator", "brief", "--phase", "start", check=True,
         )
         harness = started.stdout.split("Harness memory:\n", 1)[1].split(
-            "\n\nTask counts:", 1,
+            "\n\nDifficulty levels:", 1,
         )[0]
         self.assertLessEqual(len(harness.splitlines()) + 1, 12)
         for control in (
@@ -1831,7 +1906,9 @@ class RelayTests(unittest.TestCase):
         globals_["now"] = lambda: "2026-01-01T00:00:01Z"
         globals_["say"] = lambda *_args: None
 
-        module["orchestrator_start_brief"]("/relay", [], consume_handoff=True)
+        module["orchestrator_start_brief"](
+            "/relay", [], consume_handoff=True, include_levels_ask=False,
+        )
         self.assertEqual(events, [
             ("enter", "orchestrator-handoff.lock"), "read", "write",
             ("exit", "orchestrator-handoff.lock"),
@@ -1842,6 +1919,49 @@ class RelayTests(unittest.TestCase):
             ("enter", "orchestrator-handoff.lock"), "read", "archive", "write",
             ("exit", "orchestrator-handoff.lock"),
         ])
+
+    def test_start_brief_and_hooks_do_not_write_beyond_handoff_consumption(self):
+        project = self.make_project()
+        runtime = project / ".attention-relay"
+        handoff = runtime / "orchestrator-handoff.md"
+        handoff.write_text(
+            "# Orchestrator handoff\n"
+            "generated_at: 2026-01-01T00:00:00Z\n"
+            "consumed_at: (not yet)\n"
+            "goal: verify read-only onboarding\n"
+            "done:\n- (none)\n"
+        )
+        (runtime / ".locks" / "orchestrator-handoff.lock").touch()
+
+        def snapshot():
+            return {
+                path.relative_to(runtime).as_posix(): path.read_bytes()
+                for path in runtime.rglob("*") if path.is_file()
+            }
+
+        before = snapshot()
+        started = self.relay(
+            project, "orchestrator", "brief", "--phase", "start", check=True,
+        )
+        self.assertIn("Difficulty levels:", started.stdout)
+        after_start = snapshot()
+        changed = {
+            path for path in before if before[path] != after_start.get(path)
+        } | (set(after_start) - set(before))
+        self.assertEqual(changed, {"orchestrator-handoff.md"})
+        self.assertNotIn("consumed_at: (not yet)", handoff.read_text())
+
+        hook_command = [
+            runtime / "relay", "hook-event", "session-start",
+        ]
+        for hook_input in ('{"source":"startup"}', '{"source":"compact"}'):
+            hooked = subprocess.run(
+                hook_command, cwd=project, input=hook_input, text=True,
+                capture_output=True,
+            )
+            self.assertEqual(hooked.returncode, 0)
+            self.assertEqual(hooked.stderr, "")
+        self.assertEqual(snapshot(), after_start)
 
     def test_handoff_same_second_acceptance_is_emitted_once(self):
         project = self.make_project()
@@ -1984,13 +2104,17 @@ class RelayTests(unittest.TestCase):
                 )
 
         notice = "attention-relay: context was compacted; state re-injected below."
+        difficulty_start = brief.index("\nDifficulty levels:\n")
+        difficulty_end = brief.index("\n\n", difficulty_start + 1)
+        compact_brief = brief[:difficulty_start] + brief[difficulty_end + 1:]
         compact = subprocess.run(
             command, cwd=project, input='{"source":"compact"}', text=True,
             capture_output=True,
         )
         self.assertEqual(compact.returncode, 0)
         self.assertEqual(compact.stderr, "")
-        self.assertEqual(compact.stdout, notice + "\n" + brief)
+        self.assertEqual(compact.stdout, notice + "\n" + compact_brief)
+        self.assertNotIn("Difficulty levels:", compact.stdout)
 
         (project / ".attention-relay" / "orchestrator-handoff.md").write_text(
             "goal: " + "x" * 10000 + "\nlast handoff line\n"
@@ -2539,7 +2663,7 @@ class RelayTests(unittest.TestCase):
         before = snapshot()
         tiers = self.relay(project, "tiers", check=True)
         executable = sys.executable
-        expected = (
+        tier_blocks = (
             f"Tier: default\nExecutable: {executable}\nCommand source: default\n"
             "Worker timeout: 2.5 minutes\nCapsule budget: 4000 characters\n\n"
             f"Tier: alpha\nExecutable: {executable}\nCommand source: default\n"
@@ -2547,10 +2671,23 @@ class RelayTests(unittest.TestCase):
             f"Tier: zeta\nExecutable: {executable}\nCommand source: tier\n"
             "Worker timeout: 0 minutes\nCapsule budget: 4000 characters\n"
         )
+        expected = tier_blocks + "Conventional levels missing: hard, medium, easy\n"
         self.assertEqual(tiers.stdout, expected)
         self.assertNotIn("--secret", tiers.stdout)
         self.assertNotIn("do-not-print", tiers.stdout)
         self.assertEqual(snapshot(), before)
+
+        config.write_text(config.read_text() + "\n[tiers.hard]\ncapsule_max_chars = 4100\n")
+        partial = self.relay(project, "tiers", check=True)
+        self.assertTrue(partial.stdout.endswith(
+            "Conventional levels missing: medium, easy\n",
+        ))
+        config.write_text(config.read_text() + (
+            "\n[tiers.medium]\ncapsule_max_chars = 4200\n"
+            "\n[tiers.easy]\ncapsule_max_chars = 4300\n"
+        ))
+        complete = self.relay(project, "tiers", check=True)
+        self.assertNotIn("Conventional levels missing:", complete.stdout)
         denied = self.relay(
             project, "tiers", env={"RELAY_TASK_ID": "T999-worker"},
         )

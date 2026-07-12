@@ -16,6 +16,7 @@ It coordinates worker CLIs; it is not an agent model, package manager, patch que
 - An independent audit found and fixed four defects before release: an unlocked handoff read-modify-write race, a soft hook-output cap, a same-second handoff boundary loss, and non-executable command forms in `worker.md`. All have regression tests.
 - The update release audit found five blocking malformed-input and validation defects; oversized JSON integers, indented report fences, lowercase credential labels, and non-finite timeouts are now fixed with regression coverage.
 - The previously unreproduced single-test error was caused by suite subprocesses inheriting the caller's stdin: hook-event reads blocked on non-EOF stdin until the 15-second harness timeout. The harness now uses `subprocess.DEVNULL` by default, while hook-event tests that supply JSON continue to pipe stdin explicitly.
+- Start briefs now provide bounded, missing-only onboarding for the optional conventional `hard`, `medium`, and `easy` tiers. They ask the user to choose models/providers, never write configuration, disappear once all three tiers exist, and are suppressed during post-compaction hook re-injection; `relay tiers` reports any missing conventional names.
 - No known unfinished feature path. A `relay orchestrate` launcher (framework-owned orchestrator process) was deliberately deferred, not forgotten.
 - The upstream working copy on the author's machine contains a live, Git-ignored `.agent-relay/` (v1) runtime that was used to orchestrate this build. It is dev tooling, not part of the project; v2 installs create `.attention-relay/`.
 
@@ -48,7 +49,7 @@ echo seed > "$tmp/seed.txt" && git -C "$tmp" add . && git -C "$tmp" commit -qm s
 "$tmp/.attention-relay/relay" validate && rm -rf "$tmp"
 ```
 
-Expected: init ends with `next: have your agent read .attention-relay/orchestrator.md and run .attention-relay/relay orchestrator brief --phase start`; the start brief prints the orchestrator role, a `Harness memory:` section, and `Next actions:`; validate prints `ok: 0 active task(s)`.
+Expected: init ends with `next: have your agent read .attention-relay/orchestrator.md and run .attention-relay/relay orchestrator brief --phase start`; the start brief prints the orchestrator role, a `Harness memory:` section, optional missing-level onboarding, and `Next actions:`; validate prints `ok: 0 active task(s)`.
 Do not smoke-test a real worker unless the configured worker CLI and its credentials work locally.
 
 ## Stack
@@ -77,7 +78,7 @@ Relay itself makes no HTTP requests. The configured worker command (default: Her
 | `framework/worker.md` | Worker contract: capsule re-reads, phase briefs, scope rules, report shape, token-gated finish. |
 | `framework/config.example.toml` | Default worker command (memory-clean Hermes), tiers, limits, gates; copied to runtime `config.toml` on init. |
 | `framework/memory.md` | Empty indexed-memory template copied on first initialization. |
-| `tests/test_relay.py` | Canonical 96-test end-to-end suite and all stub worker fixtures. |
+| `tests/test_relay.py` | Canonical 98-test end-to-end suite and all stub worker fixtures. |
 | `SPEC.md` | Normative behavioral contract; embedded byte-identically in `prompts/create-framework.md`. |
 | `prompts/create-framework.md` | Standalone generation prompt with the embedded exact SPEC copy (BEGIN SPEC / END SPEC markers). |
 | `prompts/improve-framework.md` | Review prompt naming required v1 safety and v2 capsule/token/handoff/hook checks. |
@@ -123,7 +124,7 @@ Runtime layout after `relay init <git-root>` (all Git-ignored):
 End-to-end flow with the v2 edge mechanisms marked:
 
 ```text
-orchestrator brief --phase start      <- beginning edge: role + handoff + Harness memory + next actions
+orchestrator brief --phase start      <- beginning edge: role + handoff + Harness memory + optional difficulty ask + next actions
    | task create -> edit spec (Objective/Acceptance criteria/... are the capsule source)
    v
 run: pick_wave -> prepare_worker compiles capsule
@@ -144,7 +145,7 @@ orchestrator brief --phase close --goal TEXT [--avoid TEXT]... -> handoff writte
 Statuses: `queued → running → needs_review → done`, or `needs_decision`/`blocked`/`failed → queued` (after decide/repair/return). Workers can submit only the four `WORKER_FINAL` statuses; only `task accept` records `done`.
 Scope enforcement, temp-index Git snapshots, leases, and archive semantics are inherited from v1 unchanged: every changed path outside the wave's scopes blocks the wave; declared `--changed` paths must equal the observed scoped diff case-insensitively.
 
-Claude Code integration (opt-in): `relay hooks claude-code [--write]` prints or merges two matcher-free hooks into the project's `.claude/settings.json` — SessionStart runs `hook-event session-start` (start brief as stdout → session context, including explicit state re-injection after automatic or manual compaction) and UserPromptSubmit runs `hook-event user-prompt-submit` (JSON `additionalContext` with the Next-actions capsule). Both cap output at 9000 chars and emit nothing (exit 0) on any error.
+Claude Code integration (opt-in): `relay hooks claude-code [--write]` prints or merges two matcher-free hooks into the project's `.claude/settings.json` — SessionStart runs `hook-event session-start` (start brief as stdout → session context, including explicit state re-injection after automatic or manual compaction, but without repeating the Difficulty levels ask after compaction) and UserPromptSubmit runs `hook-event user-prompt-submit` (JSON `additionalContext` with the Next-actions capsule). Both cap output at 9000 chars and emit nothing (exit 0) on any error.
 
 ## Configuration
 
@@ -165,6 +166,12 @@ Claude Code integration (opt-in): `relay hooks claude-code [--write]` prints or 
 | `gates.phase_sequence_requires_briefs` | Default false: optionally require edit → verify → report receipts; a new edit after report invalidates the finish token. |
 
 Environment variables (all read/written in `framework/relay`): `RELAY_DIR` (runtime override in, worker export out), `RELAY_TASK_ID`, `RELAY_ATTEMPT`, `RELAY_LEASE`, `RELAY_ROOT` (worker exports; their presence marks a process as a leased worker and blocks orchestrator commands). There is no `.env`; worker credentials belong to the external agent CLI.
+
+`hard`, `medium`, and `easy` are optional conventional tier names, not new keys
+or reserved/fallback tiers. Until all three matching tables exist, the start
+brief prints copy-ready missing-only examples and `relay tiers` appends a
+missing-level hint. Configuration and tier selection remain explicit user and
+orchestrator actions.
 
 ## Landmines
 
@@ -194,4 +201,4 @@ Environment variables (all read/written in `framework/relay`): `RELAY_DIR` (runt
 | Add a new orchestrator brief phase | `orchestrator_*_brief` functions + `cmd_orchestrator_brief` + `build_parser` in `framework/relay`; `framework/orchestrator.md`; SPEC.md + embedded copy; new tests. |
 | Change the default capsule budget | `configured_capsule_max_chars` in `framework/relay`; `framework/config.example.toml`; SPEC.md + embedded copy; budget tests in `tests/test_relay.py`. |
 
-Last updated 2026-07-12 — Compaction-aware SessionStart re-grounding and the update release audit/fix cycle completed.
+Last updated 2026-07-12 — Optional difficulty-level onboarding added without changing strict opt-in tier semantics.

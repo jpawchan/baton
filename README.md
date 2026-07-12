@@ -50,7 +50,10 @@ Task tiers are explicit rather than fallback labels. `default` uses the global
 worker command and limits; each other tier must be configured and may override
 the command, worker timeout, and capsule budget independently. Run
 `.attention-relay/relay tiers` to inspect effective settings without printing
-worker command flags.
+worker command flags. Until all three optional conventional tiers (`hard`,
+`medium`, and `easy`) are configured, the start brief asks the orchestrator to
+ask you which models they should use and prints missing-only TOML to copy. Relay
+does not register, select, or write these tiers automatically.
 
 ## How is this different from Agent Relay?
 
@@ -113,7 +116,8 @@ This creates a local `.attention-relay/` directory in the project.
 1. Install Relay in your project.
 2. Ask your main agent to read `.attention-relay/orchestrator.md`.
 3. The agent runs the start brief and offers its memory-clean choices before
-   planning:
+   planning. If the optional `hard`, `medium`, or `easy` tiers are missing, it
+   also asks which model (and optionally provider) each should use:
 
    ```bash
    .attention-relay/relay orchestrator brief --phase start
@@ -133,7 +137,8 @@ settings:
 
 The matcher-free `SessionStart` hook injects the start-phase orchestrator brief
 at startup and re-injects it after automatic or manual compaction, with an
-explicit context-compacted notice. The `UserPromptSubmit` hook injects a bounded,
+explicit context-compacted notice. Post-compaction re-injection omits the
+user-facing Difficulty levels ask. The `UserPromptSubmit` hook injects a bounded,
 state-derived `Next actions` capsule before Claude handles each prompt. Repeated
 setup is idempotent and does not replace existing hook arrays.
 

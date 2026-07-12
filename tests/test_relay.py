@@ -385,10 +385,12 @@ class RelayTests(unittest.TestCase):
         work = project / ".attention-relay" / "work" / task_id
         return project, task_id, env, work / "attempt-1.report.md", token
 
-    def review_brief_token(self, project, task_id, env=None):
+    def review_brief_token(self, project, task_id, env=None, include_log_tail=False):
+        args = ["orchestrator", "brief", "--phase", "review", task_id]
+        if include_log_tail:
+            args.append("--include-log-tail")
         brief = self.relay(
-            project, "orchestrator", "brief", "--phase", "review", task_id,
-            env=env, check=True,
+            project, *args, env=env, check=True,
         )
         token = next(
             line.removeprefix("Review token: ")
@@ -941,6 +943,136 @@ class RelayTests(unittest.TestCase):
         self.assertNotEqual(replay.returncode, 0)
         self.assertIn("review-phase brief token is required", replay.stderr)
 
+    def test_attempt_diff_summary_uses_observed_paths_and_exact_patch_state(self):
+        module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_diff_stat_probe")
+        patch = self.base / "attempt.diff"
+        patch.write_bytes(
+            b"diff --git a/added.txt b/added.txt\n"
+            b"new file mode 100644\nindex 0000000..1111111\n"
+            b"--- /dev/null\n+++ b/added.txt\n@@ -0,0 +1,2 @@\n"
+            b"+alpha\n++++ b/not-a-file.txt\n"
+            b"diff --git a/deleted.txt b/deleted.txt\n"
+            b"deleted file mode 100644\nindex 2222222..0000000\n"
+            b"--- a/deleted.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n"
+            b"-gone one\n-gone two\n"
+            b"diff --git a/modified.txt b/modified.txt\n"
+            b"index 3333333..4444444 100644\n--- a/modified.txt\n+++ b/modified.txt\n"
+            b"@@ -1 +1 @@\n-before\n+after\n"
+            b"diff --git a/mode.txt b/mode.txt\nold mode 100644\nnew mode 100755\n"
+            b"diff --git a/image.bin b/image.bin\nnew file mode 100644\n"
+            b"index 0000000..5555555\nGIT binary patch\nliteral 1\nKcmZQz00IC2\n"
+            b"diff --git a/outside.txt b/outside.txt\n"
+            b"--- a/outside.txt\n+++ b/outside.txt\n@@ -0,0 +1 @@\n+ignore me\n"
+        )
+        observed = [
+            "modified.txt", "phantom.txt", "mode.txt", "image.bin",
+            "deleted.txt", "added.txt",
+        ]
+        summary = module["attempt_diff_summary"](patch, observed)
+        self.assertEqual(summary["added"], 3)
+        self.assertEqual(summary["removed"], 3)
+        self.assertEqual(summary["files"], [
+            {"path": "added.txt", "added": 2, "removed": 0, "label": "add"},
+            {"path": "deleted.txt", "added": 0, "removed": 2, "label": "delete"},
+            {"path": "image.bin", "added": 0, "removed": 0, "label": "binary"},
+            {"path": "mode.txt", "added": 0, "removed": 0, "label": "mode"},
+            {"path": "modified.txt", "added": 1, "removed": 1, "label": "modify"},
+            {"path": "phantom.txt", "added": 0, "removed": 0, "label": "~"},
+        ])
+        missing = module["attempt_diff_summary"](
+            self.base / "missing.diff", ["still-observed.txt"],
+        )
+        self.assertEqual(
+            missing["files"],
+            [{"path": "still-observed.txt", "added": 0, "removed": 0, "label": "~"}],
+        )
+
+    def test_review_brief_prior_attempts_and_opt_in_sanitized_log_tail(self):
+        project = self.make_project()
+        self.configure(project, self.write_worker(NO_CHANGE_WORKER))
+        task_id = self.create_task(project, "review context", ["context/**"])
+        self.relay(project, "run", task_id, check=True)
+        runtime = project / ".attention-relay"
+        work = runtime / "work" / task_id
+        state_path = runtime / "tasks" / f"{task_id}.json"
+        state = json.loads(state_path.read_text())
+        state["attempt"] = 5
+        state_path.write_text(json.dumps(state))
+        for suffix in ("brief.md", "report.md", "result.json", "diff"):
+            (work / f"attempt-5.{suffix}").write_bytes(
+                (work / f"attempt-1.{suffix}").read_bytes()
+            )
+        for attempt in range(2, 5):
+            (work / f"attempt-{attempt}.report.md").write_text(f"report {attempt}\n")
+            (work / f"attempt-{attempt}.diff").write_text(f"diff {attempt}\n")
+
+        secret = "do-not-leak-environment-value"
+        lines = [f"older-{number}" for number in range(14)] + [
+            "\x1b[31mred\x1b[0m",
+            "\x1b]0;hidden title\x07visible",
+            "controls:\x00\x08clean\tkept",
+            f"REVIEW_SECRET={secret} standalone {secret}",
+            "{'PASSWORD': 'dict-secret'} Bearer bearer-secret",
+            "L" * 300,
+            "last-line",
+        ]
+        (work / "attempt-5.log").write_bytes(
+            b"X" * 70000 + b"\n" + "\n".join(lines).encode("utf-8") + b"\n"
+        )
+
+        default, _token = self.review_brief_token(project, task_id)
+        self.assertIn("Diff stat: no changes", default.stdout)
+        self.assertNotIn("Untrusted worker log tail", default.stdout)
+        self.assertNotIn("last-line", default.stdout)
+        prior = default.stdout.split("Prior attempt artifacts (most recent first):\n", 1)[1]
+        prior = prior.split("Review checklist:", 1)[0]
+        for attempt in (4, 3, 2):
+            self.assertIn(f"attempt-{attempt}.report.md", prior)
+            self.assertIn(f"attempt-{attempt}.diff", prior)
+        self.assertNotIn("attempt-1.report.md", prior)
+        self.assertIn("- +1 older attempt", prior)
+        self.assertLess(prior.index("attempt-4.report.md"), prior.index("attempt-3.report.md"))
+
+        included, _token = self.review_brief_token(
+            project, task_id, env={"REVIEW_SECRET": secret}, include_log_tail=True,
+        )
+        block = included.stdout.split("Untrusted worker log tail (opt-in):", 1)[1]
+        block = "Untrusted worker log tail (opt-in):" + block.split(
+            "Review checklist:", 1,
+        )[0].rstrip("\n")
+        self.assertLessEqual(len(block), 1500)
+        self.assertLessEqual(len(block.splitlines()) - 1, 15)
+        self.assertIn("red", block)
+        self.assertIn("visible", block)
+        self.assertIn("controls:clean\tkept", block)
+        self.assertIn("REVIEW_SECRET=[redacted]", block)
+        self.assertIn("standalone [redacted]", block)
+        self.assertIn("last-line", block)
+        self.assertNotIn("hidden title", block)
+        self.assertNotIn(secret, block)
+        self.assertNotIn("dict-secret", block)
+        self.assertNotIn("bearer-secret", block)
+        self.assertNotIn("\x1b", block)
+        self.assertNotIn("\x00", block)
+        self.assertTrue(any(len(line) == 240 for line in block.splitlines()))
+
+        (work / "attempt-5.log").unlink()
+        unavailable, _token = self.review_brief_token(
+            project, task_id, include_log_tail=True,
+        )
+        self.assertIn(
+            "Untrusted worker log tail (opt-in):\nlog tail unavailable",
+            unavailable.stdout,
+        )
+        rejected = self.relay(
+            project, "orchestrator", "brief", "--phase", "start",
+            "--include-log-tail",
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn(
+            "--include-log-tail is valid only for the review phase", rejected.stderr,
+        )
+
     def test_review_token_invalidated_by_return_and_accept_gate_off(self):
         project = self.make_project()
         self.configure(project, self.write_worker(GOOD_WORKER))
@@ -1016,7 +1148,8 @@ class RelayTests(unittest.TestCase):
         self.relay(project, "run", task_id, check=True)
         work = project / ".attention-relay" / "work" / task_id
         self.assertEqual((work / "attempt-1.diff").read_text(), "")
-        _brief, token = self.review_brief_token(project, task_id)
+        brief, token = self.review_brief_token(project, task_id)
+        self.assertIn("Diff stat: no changes", brief.stdout)
 
         spec = project / ".attention-relay" / "tasks" / f"{task_id}.md"
         spec.write_text(spec.read_text().replace(

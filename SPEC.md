@@ -223,7 +223,21 @@ task creation, run, review/accept, and session close.
   fails the command. The report, result, and attempt diff must each be a regular,
   non-symlink file; an empty diff is valid. The brief prints their paths with the
   first 12 hexadecimal characters of each SHA-256 digest, plus declared and
-  observed changed paths and an accept/return/decide checklist.
+  observed changed paths. After those artifact lines it streams the diff to print
+  an aggregate added/removed stat and at most 10 per-file add/delete/modify,
+  binary, mode, or conservative `~` lines using the manifest's observed paths as
+  the authoritative file list; an empty diff prints `Diff stat: no changes`.
+  Retried tasks also list existing report and diff paths for at most the three
+  most recent prior attempts, newest first, with an older-attempt overflow marker.
+  The review-only `--include-log-tail` flag appends an explicitly labeled
+  `Untrusted worker log tail (opt-in):` block. Relay seeks within only the final
+  64 KiB of the current attempt log, sanitizes ANSI/OSC and C0/C1 controls except
+  tab, redacts environment/credential values, and emits at most the final 15
+  lines, 240 characters per line, and 1500 characters for the whole block. A
+  missing or unreadable log says `log tail unavailable`; without the flag no log
+  content is printed. The flag is rejected for every non-review phase. A
+  post-submission exit warning still names the current attempt log path. The
+  brief then prints an accept/return/decide checklist.
   Under the same lock, it builds an evidence manifest containing task id,
   attempt, the displayed capsule SHA-256, report SHA-256, result SHA-256,
   attempt-diff SHA-256, and sorted declared and observed changed-path lists. It

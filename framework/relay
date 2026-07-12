@@ -316,6 +316,211 @@ def diff_path(relay_dir, task_id, attempt):
     return os.path.join(work_dir(relay_dir, task_id), "attempt-%d.diff" % attempt)
 
 
+def git_diff_header_path(line):
+    """Return the destination path from one binary Git diff header, if parseable."""
+    prefix = b"diff --git "
+    if not line.startswith(prefix):
+        return None
+    fields = []
+    remaining = line[len(prefix):].rstrip(b"\r\n")
+    while remaining and len(fields) < 2:
+        remaining = remaining.lstrip(b" ")
+        if remaining.startswith(b'"'):
+            value = bytearray()
+            index = 1
+            while index < len(remaining):
+                byte = remaining[index]
+                if byte == ord('"'):
+                    index += 1
+                    break
+                if byte != ord("\\"):
+                    value.append(byte)
+                    index += 1
+                    continue
+                index += 1
+                if index >= len(remaining):
+                    return None
+                escaped = remaining[index]
+                escapes = {
+                    ord("a"): 7, ord("b"): 8, ord("t"): 9, ord("n"): 10,
+                    ord("v"): 11, ord("f"): 12, ord("r"): 13,
+                    ord('"'): ord('"'), ord("\\"): ord("\\"),
+                }
+                if escaped in escapes:
+                    value.append(escapes[escaped])
+                    index += 1
+                elif ord("0") <= escaped <= ord("7"):
+                    digits = bytearray()
+                    while (index < len(remaining) and len(digits) < 3
+                           and ord("0") <= remaining[index] <= ord("7")):
+                        digits.append(remaining[index])
+                        index += 1
+                    octet = int(digits.decode("ascii"), 8)
+                    if octet > 255:
+                        return None
+                    value.append(octet)
+                else:
+                    value.append(escaped)
+                    index += 1
+            else:
+                return None
+            fields.append(bytes(value))
+            remaining = remaining[index:]
+        else:
+            field, separator, remaining = remaining.partition(b" ")
+            fields.append(field)
+            if not separator:
+                remaining = b""
+    if len(fields) != 2 or not fields[1].startswith(b"b/"):
+        return None
+    return os.fsdecode(fields[1][2:])
+
+
+def attempt_diff_summary(path, observed_paths):
+    """Stream a Git patch and summarize only its authoritative observed paths."""
+    paths = sorted(set(observed_paths))
+    files = {
+        name: {
+            "path": name, "added": 0, "removed": 0, "label": "~",
+            "new": False, "deleted": False, "binary": False, "mode": False,
+        }
+        for name in paths
+    }
+    current = None
+    in_hunk = False
+    try:
+        with open(path, "rb") as source:
+            for line in source:
+                if line.startswith(b"diff --git "):
+                    current = files.get(git_diff_header_path(line))
+                    in_hunk = False
+                    continue
+                if current is None:
+                    continue
+                if line.startswith(b"new file mode "):
+                    current["new"] = True
+                elif line.startswith(b"deleted file mode "):
+                    current["deleted"] = True
+                elif line.startswith((b"old mode ", b"new mode ")):
+                    current["mode"] = True
+                elif line.startswith((b"GIT binary patch", b"Binary files ")):
+                    current["binary"] = True
+                    in_hunk = False
+                elif line.startswith(b"@@"):
+                    in_hunk = True
+                elif in_hunk and line.startswith(b"+"):
+                    current["added"] += 1
+                elif in_hunk and line.startswith(b"-"):
+                    current["removed"] += 1
+    except OSError:
+        pass
+
+    rendered = []
+    for name in paths:
+        item = files[name]
+        if item["binary"]:
+            label = "binary"
+        elif item["new"]:
+            label = "add"
+        elif item["deleted"]:
+            label = "delete"
+        elif item["added"] or item["removed"]:
+            label = "modify"
+        elif item["mode"]:
+            label = "mode"
+        else:
+            label = "~"
+        rendered.append({
+            "path": name, "added": item["added"],
+            "removed": item["removed"], "label": label,
+        })
+    return {
+        "files": rendered,
+        "added": sum(item["added"] for item in rendered),
+        "removed": sum(item["removed"] for item in rendered),
+    }
+
+
+ANSI_OSC_RE = re.compile(r"(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)", re.DOTALL)
+ANSI_STRING_RE = re.compile(
+    r"(?:\x1b[P^_X]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c|$)", re.DOTALL,
+)
+ANSI_CSI_RE = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]")
+ANSI_ESCAPE_RE = re.compile(r"\x1b[ -/]*[@-~]")
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+ENV_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b[A-Z_][A-Z0-9_]{1,}\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
+)
+ENV_COLON_RE = re.compile(
+    r"((?:[\"'][A-Z_][A-Z0-9_]{1,}[\"']|\b[A-Z_][A-Z0-9_]{1,})\s*:\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
+)
+SECRET_VALUE_RE = re.compile(
+    r"(?i)(\b(?:brief|review|bearer|access|refresh|api|auth|session)[ _-]?"
+    r"(?:token|key)?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
+)
+BEARER_RE = re.compile(r"(?i)(\bbearer\s+)\S+")
+
+
+def sanitize_log_text(text):
+    """Remove terminal controls and recognizable environment/credential values."""
+    text = ANSI_OSC_RE.sub("", text)
+    text = ANSI_STRING_RE.sub("", text)
+    text = ANSI_CSI_RE.sub("", text)
+    text = ANSI_ESCAPE_RE.sub("", text)
+    text = ENV_ASSIGNMENT_RE.sub(r"\1[redacted]", text)
+    text = ENV_COLON_RE.sub(r"\1[redacted]", text)
+    text = SECRET_VALUE_RE.sub(r"\1[redacted]", text)
+    text = BEARER_RE.sub(r"\1[redacted]", text)
+    sensitive_names = re.compile(r"(?i)(token|secret|pass|key|auth|credential|cookie|session)")
+    values = {
+        value for name, value in os.environ.items()
+        if value and len(value) >= 4 and sensitive_names.search(name)
+    }
+    for value in sorted(values, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return CONTROL_RE.sub("", text)
+
+
+def bounded_log_tail(path, byte_limit=64 * 1024, line_limit=15):
+    """Read and sanitize only a bounded final-byte window from an attempt log."""
+    descriptor = None
+    try:
+        if os.path.islink(path):
+            return None
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            return None
+        start = max(0, file_stat.st_size - byte_limit)
+        os.lseek(descriptor, start, os.SEEK_SET)
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None
+            data = source.read(byte_limit)
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if start:
+        _partial, separator, data = data.partition(b"\n")
+        if not separator:
+            data = b""
+    text = sanitize_log_text(data.decode("utf-8", errors="replace"))
+    return [line[:240] for line in text.splitlines()[-line_limit:]]
+
+
+def untrusted_log_tail_block(path, maximum=1500):
+    label = "Untrusted worker log tail (opt-in):"
+    lines = bounded_log_tail(path)
+    if lines is None:
+        lines = ["log tail unavailable"]
+    while len(lines) > 1 and len(label) + 1 + len("\n".join(lines)) > maximum:
+        lines.pop(0)
+    block = label + (("\n" + "\n".join(lines)) if lines else "")
+    return block[:maximum]
+
+
 def brief_token_path(relay_dir, task_id):
     return os.path.join(work_dir(relay_dir, task_id), "finish-brief-token.json")
 
@@ -1514,7 +1719,7 @@ def displayed_review_capsule(relay_dir, task, check_fresh=False):
     return compile_current_task_capsule(relay_dir, task), False, None
 
 
-def orchestrator_review_brief(relay_dir, task_id):
+def orchestrator_review_brief(relay_dir, task_id, include_log_tail=False):
     import secrets
 
     with task_lock(relay_dir, task_id):
@@ -1527,6 +1732,26 @@ def orchestrator_review_brief(relay_dir, task_id):
         )
         manifest = build_review_evidence_manifest(relay_dir, task, capsule)
         worker_exit = latest_worker_exit(task)
+        diff_summary = attempt_diff_summary(
+            diff_path(relay_dir, task["id"], attempt),
+            manifest["evidence"]["observed"],
+        )
+        prior_artifacts = []
+        omitted_prior_attempts = 0
+        for prior_attempt in range(attempt - 1, 0, -1):
+            paths = []
+            for name, artifact in (
+                    ("report", report_path(relay_dir, task["id"], prior_attempt)),
+                    ("diff", diff_path(relay_dir, task["id"], prior_attempt))):
+                if os.path.isfile(artifact) and not os.path.islink(artifact):
+                    paths.append((name, artifact))
+            if paths:
+                if len(prior_artifacts) < 3:
+                    prior_artifacts.append((prior_attempt, paths))
+                else:
+                    omitted_prior_attempts += 1
+        log = os.path.join(work_dir(relay_dir, task["id"]), "attempt-%d.log" % attempt)
+        log_tail = untrusted_log_tail_block(log) if include_log_tail else None
         token = secrets.token_hex(32)
         token_record = dict(manifest)
         token_record["token"] = token
@@ -1545,7 +1770,6 @@ def orchestrator_review_brief(relay_dir, task_id):
             "showing launch capsule"
         )
     if task.get("warning"):
-        log = os.path.join(work_dir(relay_dir, task["id"]), "attempt-%d.log" % attempt)
         say("\nWARNING: Worker exited with code {} after submission; inspect log: {}".format(
             worker_exit.get("exit_code"), os.path.relpath(log, root),
         ))
@@ -1567,6 +1791,35 @@ def orchestrator_review_brief(relay_dir, task_id):
     say("- Observed changed paths: " + (
         ", ".join(observed) if observed else "(none recorded)"
     ))
+    if not diff_summary["files"]:
+        say("Diff stat: no changes")
+    else:
+        say("Diff stat: {} files, +{} -{}".format(
+            len(diff_summary["files"]),
+            diff_summary["added"], diff_summary["removed"],
+        ))
+        stat_lines = [
+            "{}: +{} -{} {}".format(
+                item["path"], item["added"], item["removed"], item["label"],
+            )
+            for item in diff_summary["files"]
+        ]
+        for line in limited_lines(stat_lines, limit=10):
+            say("- " + line)
+    if prior_artifacts:
+        say("Prior attempt artifacts (most recent first):")
+        for prior_attempt, paths in prior_artifacts:
+            for name, artifact in paths:
+                say("- attempt {} {}: {}".format(
+                    prior_attempt, name, os.path.relpath(artifact, root),
+                ))
+        if omitted_prior_attempts:
+            say("- +{} older attempt{}".format(
+                omitted_prior_attempts,
+                "s" if omitted_prior_attempts != 1 else "",
+            ))
+    if log_tail is not None:
+        say("\n" + log_tail)
     say("Review checklist:")
     say("- Compare the report, diff, and declared/observed paths to the criteria.")
     say("- Verify the reported checks and inspect risky full files when needed.")
@@ -1639,10 +1892,12 @@ def cmd_orchestrator_brief(args):
     require_orchestrator()
     relay_dir = require_relay_dir()
     tasks = load_all_tasks(relay_dir)
+    if args.include_log_tail and args.phase != "review":
+        die("--include-log-tail is valid only for the review phase")
     if args.phase == "review":
         if not args.id:
             die("review phase requires a task id")
-        orchestrator_review_brief(relay_dir, args.id)
+        orchestrator_review_brief(relay_dir, args.id, args.include_log_tail)
     elif args.id:
         die("a task id is valid only for the review phase")
     elif args.phase == "start":
@@ -2964,6 +3219,10 @@ def build_parser():
         "--phase", required=True, choices=("start", "plan", "run", "review", "close"),
     )
     command.add_argument("id", nargs="?")
+    command.add_argument(
+        "--include-log-tail", action="store_true",
+        help="append a bounded sanitized log tail (review phase only)",
+    )
     command.set_defaults(function=cmd_orchestrator_brief)
 
     hooks = commands.add_parser("hooks", help="configure optional host integrations")

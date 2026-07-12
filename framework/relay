@@ -557,6 +557,7 @@ List the paths and facts the worker needs. Reference memory ids when useful.
 CAPSULE_SECTIONS = (
     "Objective", "Acceptance criteria", "Not allowed", "Verification",
 )
+CAPSULE_MEMORY_MAX_REFERENCES = 6
 CAPSULE_REQUIRED_PLACEHOLDERS = {
     "Objective": "Replace this line with one clear outcome.",
     "Acceptance criteria": "- Add observable requirements.",
@@ -614,7 +615,7 @@ def capsule_components_result(parts, capsule_max_chars):
     }
 
 
-def context_capsule_components(task, spec, capsule_max_chars=4000):
+def context_capsule_components(task, spec, memory_entries, capsule_max_chars=4000):
     """Build a deterministic capsule and measurements without enforcing its budget."""
     if isinstance(capsule_max_chars, bool) or not isinstance(capsule_max_chars, int) \
             or capsule_max_chars < 1:
@@ -636,6 +637,37 @@ def context_capsule_components(task, spec, capsule_max_chars=4000):
                 "task-specific content".format(task_id, name, placeholder)
             )
 
+    references = list(dict.fromkeys(
+        re.findall(r"\bM\d{3,}\b", sections.get("Context", ""))
+    ))
+    if len(references) > CAPSULE_MEMORY_MAX_REFERENCES:
+        raise ValueError(
+            "{}: Context references {} memory entries; maximum is {}; split the task "
+            "or remove references".format(
+                task_id, len(references), CAPSULE_MEMORY_MAX_REFERENCES,
+            )
+        )
+    memory_by_id = {
+        memory_id: (audience, summary)
+        for memory_id, audience, summary in memory_entries
+    }
+    referenced_memory = []
+    for memory_id in references:
+        entry = memory_by_id.get(memory_id)
+        if entry is None:
+            raise ValueError(
+                "{}: referenced memory id {} is missing from memory.md".format(
+                    task_id, memory_id,
+                )
+            )
+        audience, summary = entry
+        if audience == "O":
+            raise ValueError(
+                "{}: referenced memory id {} is orchestrator-only [O]; worker capsules "
+                "may reference only [W] or [B]".format(task_id, memory_id)
+            )
+        referenced_memory.append((memory_id, summary))
+
     scope = ", ".join(task.get("scope", [])) or "whole project"
     parts = [
         ("Header", "# Critical Context Capsule"),
@@ -646,6 +678,15 @@ def context_capsule_components(task, spec, capsule_max_chars=4000):
         parts.append((name, "## {}\n{}".format(
             name, sections.get(name, "") or "(none)",
         )))
+    if referenced_memory:
+        lines = [
+            "Load full entries as needed with "
+            "`python3 .attention-relay/relay memory show ID`.",
+        ]
+        lines.extend("- {}: {}".format(*entry) for entry in referenced_memory)
+        parts.append((
+            "Referenced memory", "## Referenced memory\n" + "\n".join(lines),
+        ))
     if task.get("attempt", 1) > 1:
         feedback = latest_task_spec_entry(sections.get("Review feedback", ""))
         decision = latest_task_spec_entry(sections.get("Decisions", ""))
@@ -662,12 +703,18 @@ def context_capsule_components(task, spec, capsule_max_chars=4000):
 
 def stored_context_capsule_components(capsule, capsule_max_chars=4000):
     """Measure a stored launch capsule without consulting mutable task spec text."""
-    labels = (*CAPSULE_SECTIONS, "Retry delta")
+    labels = (*CAPSULE_SECTIONS, "Referenced memory", "Retry delta")
     matches = list(re.finditer(
         r"(?:^|\n\n)## ({})\n".format("|".join(map(re.escape, labels))), capsule,
     ))
     found = [match.group(1) for match in matches]
-    if found not in [list(CAPSULE_SECTIONS), [*CAPSULE_SECTIONS, "Retry delta"]]:
+    valid_sections = [
+        list(CAPSULE_SECTIONS),
+        [*CAPSULE_SECTIONS, "Referenced memory"],
+        [*CAPSULE_SECTIONS, "Retry delta"],
+        [*CAPSULE_SECTIONS, "Referenced memory", "Retry delta"],
+    ]
+    if found not in valid_sections:
         raise ValueError("stored capsule sections are missing or invalid")
     prefix = capsule[:matches[0].start()]
     header, separator, task_scope = prefix.partition("\n\n")
@@ -701,9 +748,9 @@ def capsule_budget_error(task_id, result):
     )
 
 
-def compile_context_capsule(task, spec, capsule_max_chars=4000):
+def compile_context_capsule(task, spec, memory_entries, capsule_max_chars=4000):
     """Compile a deterministic, bounded capsule from canonical task sections."""
-    result = context_capsule_components(task, spec, capsule_max_chars)
+    result = context_capsule_components(task, spec, memory_entries, capsule_max_chars)
     if result["overflow"]:
         raise ValueError(
             capsule_budget_error(task.get("id", "unknown"), result)
@@ -848,8 +895,12 @@ def cmd_task_capsule(args):
             die("current attempt capsule is missing or invalid; rerun the task")
         source_label = "launch (attempt {})".format(attempt)
     else:
+        _, memory_text = read_memory(relay_dir)
+        memory_entries = memory_index_entries(memory_text)
         with open(task_md_path(relay_dir, task["id"]), encoding="utf-8") as source:
-            result = context_capsule_components(task, source.read(), maximum)
+            result = context_capsule_components(
+                task, source.read(), memory_entries, maximum,
+            )
         capsule = result["text"]
         source_label = "current spec (prospective)"
 
@@ -1266,10 +1317,26 @@ def orchestrator_review_brief(relay_dir, task_id):
             die("{} is {}, not needs_review".format(task["id"], task.get("status")))
         attempt = task.get("attempt", 1)
         config = load_config(relay_dir)
+        _, memory_text = read_memory(relay_dir)
+        memory_entries = memory_index_entries(memory_text)
         with open(task_md_path(relay_dir, task["id"]), encoding="utf-8") as source:
-            capsule = compile_context_capsule(
-                task, source.read(), configured_capsule_max_chars(config),
+            fresh_capsule = compile_context_capsule(
+                task, source.read(), memory_entries,
+                configured_capsule_max_chars(config),
             )
+        brief_file = os.path.join(
+            work_dir(relay_dir, task["id"]), "attempt-%d.brief.md" % attempt,
+        )
+        capsule = fresh_capsule
+        capsule_drifted = False
+        if os.path.isfile(brief_file):
+            with open(brief_file, encoding="utf-8") as source:
+                stored_brief = source.read()
+            _digest, separator, stored_capsule = stored_brief.partition("\n\n")
+            if not separator or not stored_capsule.startswith("# Critical Context Capsule"):
+                die("current attempt capsule is missing or invalid; rerun the task")
+            capsule = stored_capsule
+            capsule_drifted = fresh_capsule != stored_capsule
         result = {}
         result_file = result_path(relay_dir, task["id"], attempt)
         if os.path.isfile(result_file):
@@ -1287,6 +1354,11 @@ def orchestrator_review_brief(relay_dir, task_id):
     report = report_path(relay_dir, task["id"], attempt)
     diff = os.path.join(work_dir(relay_dir, task["id"]), "attempt-%d.diff" % attempt)
     say(capsule)
+    if capsule_drifted:
+        say(
+            "\nWARNING: capsule inputs drifted since launch (spec or memory changed); "
+            "showing launch capsule"
+        )
     if task.get("warning"):
         log = os.path.join(work_dir(relay_dir, task["id"]), "attempt-%d.log" % attempt)
         say("\nWARNING: Worker exited with code {} after submission; inspect log: {}".format(
@@ -1720,7 +1792,8 @@ Other workers may be active. Run only the targeted checks in the task spec.
 """
 
 
-def build_prompt(relay_dir, task, capsule_max_chars=4000, capsule=None):
+def build_prompt(
+        relay_dir, task, memory_entries, capsule_max_chars=4000, capsule=None):
     root = project_root(relay_dir)
     relative_relay = os.path.relpath(relay_dir, root)
     attempt = task.get("attempt", 1)
@@ -1731,7 +1804,9 @@ def build_prompt(relay_dir, task, capsule_max_chars=4000, capsule=None):
         )
     if capsule is None:
         with open(task_md_path(relay_dir, task["id"]), encoding="utf-8") as source:
-            capsule = compile_context_capsule(task, source.read(), capsule_max_chars)
+            capsule = compile_context_capsule(
+                task, source.read(), memory_entries, capsule_max_chars,
+            )
     mechanics = WORKER_PROMPT.format(
         id=task["id"], attempt=attempt, root=root,
         scope=", ".join(task.get("scope", [])) or "whole project",
@@ -1745,13 +1820,17 @@ def build_prompt(relay_dir, task, capsule_max_chars=4000, capsule=None):
     )
 
 
-def prepare_worker(relay_dir, config, task):
+def prepare_worker(relay_dir, config, task, memory_entries):
     root = project_root(relay_dir)
     attempt = task.get("attempt", 1)
     capsule_max_chars = configured_capsule_max_chars(config)
     with open(task_md_path(relay_dir, task["id"]), encoding="utf-8") as source:
-        capsule = compile_context_capsule(task, source.read(), capsule_max_chars)
-    prompt = build_prompt(relay_dir, task, capsule_max_chars, capsule=capsule)
+        capsule = compile_context_capsule(
+            task, source.read(), memory_entries, capsule_max_chars,
+        )
+    prompt = build_prompt(
+        relay_dir, task, memory_entries, capsule_max_chars, capsule=capsule,
+    )
     directory = work_dir(relay_dir, task["id"])
     os.makedirs(directory, exist_ok=True)
     prompt_file = os.path.join(directory, "attempt-%d.prompt.md" % attempt)
@@ -2035,6 +2114,8 @@ def run_wave(args, relay_dir, context):
     config = load_config(relay_dir)
     try:
         max_parallel, timeout_minutes = configured_limits(config, args.max_parallel)
+        _, memory_text = read_memory(relay_dir)
+        memory_entries = memory_index_entries(memory_text)
     except ValueError as error:
         die(str(error))
 
@@ -2055,7 +2136,10 @@ def run_wave(args, relay_dir, context):
                 say("  skip {}: {}".format(task_id, reason))
             raise SystemExit(0 if not skipped else 1)
         try:
-            prepared = [prepare_worker(relay_dir, config, task) for task in wave]
+            prepared = [
+                prepare_worker(relay_dir, config, task, memory_entries)
+                for task in wave
+            ]
             for item in prepared:
                 item["lease"] = context["lease"]
             before_tree = git_snapshot(root)
@@ -2208,7 +2292,8 @@ def dependency_cycles(tasks):
     return cycles
 
 
-def task_problems(relay_dir, task, known_tasks, capsule_max_chars=None):
+def task_problems(
+        relay_dir, task, known_tasks, memory_entries, capsule_max_chars=None):
     problems = []
     task_id = task.get("id")
     prefix = str(task_id or "unknown") + ": "
@@ -2281,7 +2366,9 @@ def task_problems(relay_dir, task, known_tasks, capsule_max_chars=None):
         if os.path.exists(spec_path):
             try:
                 with open(spec_path, encoding="utf-8") as source:
-                    compile_context_capsule(task, source.read(), capsule_max_chars)
+                    compile_context_capsule(
+                        task, source.read(), memory_entries, capsule_max_chars,
+                    )
             except (OSError, UnicodeDecodeError, ValueError) as error:
                 problems.append(str(error))
     return problems
@@ -2307,6 +2394,7 @@ def cmd_validate(args):
         except RuntimeError as error:
             problems.append("repository: " + str(error))
     capsule_max_chars = None
+    memory_entries = ()
     try:
         config = load_config(relay_dir)
         configured_limits(config)
@@ -2331,6 +2419,11 @@ def cmd_validate(args):
                 problems.append("config: prompt placeholder must be a complete argument")
     except (SystemExit, ValueError) as error:
         problems.append("config: {}".format(error))
+    try:
+        _, memory_text = read_memory(relay_dir)
+        memory_entries = memory_index_entries(memory_text)
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        problems.append("memory: {}".format(error))
     try:
         active = load_all_tasks(relay_dir)
         archived = load_archived_tasks(relay_dir)
@@ -2366,7 +2459,8 @@ def cmd_validate(args):
             seen_numbers[number] = task_id
     for task in active:
         problems.extend(task_problems(
-            relay_dir, task, known, capsule_max_chars=capsule_max_chars,
+            relay_dir, task, known, memory_entries,
+            capsule_max_chars=capsule_max_chars,
         ))
         task_id = task.get("id")
         if isinstance(task_id, str) and TASK_ID_RE.fullmatch(task_id):
@@ -2445,14 +2539,46 @@ def read_memory(relay_dir):
         return path, source.read()
 
 
+def memory_index_entries(text):
+    """Parse the strict memory index as ordered (id, audience, summary) tuples."""
+    marker = re.search(r"^## Index[ \t]*$", text, re.MULTILINE)
+    if not marker:
+        raise ValueError("memory index is missing; expected a '## Index' section")
+    following = re.search(r"^## [^\n]+[ \t]*$", text[marker.end():], re.MULTILINE)
+    end = marker.end() + following.start() if following else len(text)
+    entries = []
+    seen = set()
+    marker_line = text.count("\n", 0, marker.end()) + 1
+    pattern = re.compile(r"- (M\d{3,}) \[([WOB])\] (\S(?:.*\S)?)")
+    for offset, line in enumerate(text[marker.end():end].splitlines()):
+        if not line:
+            continue
+        line_number = marker_line + offset
+        match = pattern.fullmatch(line)
+        if not match:
+            raise ValueError(
+                "memory index line {} is malformed; expected '- M### [W|O|B] "
+                "summary': {!r}".format(line_number, line)
+            )
+        memory_id, audience, summary = match.groups()
+        if memory_id in seen:
+            raise ValueError(
+                "memory index has duplicate id {} at line {}".format(
+                    memory_id, line_number,
+                )
+            )
+        seen.add(memory_id)
+        entries.append((memory_id, audience, summary))
+    return entries
+
+
 def cmd_memory_index(args):
     relay_dir = require_relay_dir()
     _, text = read_memory(relay_dir)
     audience = {"worker": "W", "orchestrator": "O"}.get(args.audience)
-    for line in text.splitlines():
-        match = re.fullmatch(r"- (M\d+) \[([WOB])\] (.+)", line.strip())
-        if match and (audience is None or match.group(2) in (audience, "B")):
-            say("{} [{}] {}".format(*match.groups()))
+    for entry in memory_index_entries(text):
+        if audience is None or entry[1] in (audience, "B"):
+            say("{} [{}] {}".format(*entry))
 
 
 def cmd_memory_show(args):
@@ -2473,8 +2599,9 @@ def cmd_memory_add(args):
     relay_dir = require_relay_dir()
     with file_lock(lock_path(relay_dir, "memory")):
         path, text = read_memory(relay_dir)
+        entries = memory_index_entries(text)
         tag = {"worker": "W", "orchestrator": "O", "both": "B"}[args.audience]
-        numbers = [int(value) for value in re.findall(r"^(?:- |### )M(\d+) \[", text, re.MULTILINE)] or [0]
+        numbers = [int(memory_id[1:]) for memory_id, _audience, _summary in entries] or [0]
         memory_id = "M%03d" % (max(numbers) + 1)
         index_line = "- {} [{}] {}".format(memory_id, tag, args.summary)
         entry = "### {} [{}] {}\n{}\n".format(memory_id, tag, args.summary, args.body)

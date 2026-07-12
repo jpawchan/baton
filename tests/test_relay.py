@@ -4,6 +4,7 @@
 import hashlib
 import json
 import os
+import re
 import runpy
 import shlex
 import signal
@@ -300,6 +301,20 @@ class RelayTests(unittest.TestCase):
         spec.write_text(content)
         return task_id
 
+    def write_memory(self, project, entries):
+        runtime = project / ".attention-relay"
+        index = "\n".join(
+            f"- {memory_id} [{audience}] {summary}"
+            for memory_id, audience, summary, _body in entries
+        )
+        bodies = "\n\n".join(
+            f"### {memory_id} [{audience}] {summary}\n{body}"
+            for memory_id, audience, summary, body in entries
+        )
+        (runtime / "memory.md").write_text(
+            "# Memory\n\n## Index\n" + index + "\n\n## Entries\n\n" + bodies + "\n"
+        )
+
     def try_create_task(self, project, title, scope=None, depends_on=None):
         args = self.task_create_command(title, scope, depends_on)
         return self.relay(project, *args)
@@ -317,7 +332,10 @@ class RelayTests(unittest.TestCase):
         state_path.write_text(json.dumps(task))
         spec = (runtime / "tasks" / f"{task_id}.md").read_text()
         module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_brief_probe")
-        capsule = module["compile_context_capsule"](task, spec)
+        memory_entries = module["memory_index_entries"](
+            (runtime / "memory.md").read_text()
+        )
+        capsule = module["compile_context_capsule"](task, spec, memory_entries)
         digest = hashlib.sha256(capsule.encode()).hexdigest()
         brief = runtime / "work" / task_id / f"attempt-{task['attempt']}.brief.md"
         brief.parent.mkdir(parents=True, exist_ok=True)
@@ -1550,8 +1568,11 @@ module["cmd_archive"](SimpleNamespace())
         module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_capsule_probe")
         task = self.state(project, task_id)
         spec = (project / ".attention-relay" / "tasks" / f"{task_id}.md").read_text()
-        self.assertEqual(module["compile_context_capsule"](task, spec), capsule)
-        self.assertEqual(module["compile_context_capsule"](task, spec), capsule)
+        entries = module["memory_index_entries"](
+            (project / ".attention-relay" / "memory.md").read_text()
+        )
+        self.assertEqual(module["compile_context_capsule"](task, spec, entries), capsule)
+        self.assertEqual(module["compile_context_capsule"](task, spec, entries), capsule)
 
         self.relay(
             project, "task", "return", task_id,
@@ -1730,6 +1751,213 @@ module["cmd_archive"](SimpleNamespace())
         rejected = self.relay(project, "task", "capsule", archived)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn(f"{archived} is archived", rejected.stderr)
+
+    def test_referenced_memory_is_ordered_deduplicated_and_snapshotted(self):
+        project = self.make_project()
+        self.configure(project, self.write_worker(NO_CHANGE_WORKER))
+        self.write_memory(project, [
+            ("M001", "W", "First worker fact", "FIRST FULL BODY MUST NOT LEAK"),
+            ("M1000", "B", "Four-digit shared fact", "SECOND FULL BODY MUST NOT LEAK"),
+        ])
+        task_id = self.create_task(project, "referenced memory", ["memory/**"])
+        runtime = project / ".attention-relay"
+        spec_path = runtime / "tasks" / f"{task_id}.md"
+        spec_path.write_text(spec_path.read_text().replace(
+            "List the paths and facts the worker needs. Reference memory ids when useful.",
+            "Use M1000, then M001, then M1000 again. Other sections do not count.",
+        ))
+
+        preview = self.relay(project, "task", "capsule", task_id, check=True)
+        self.assertIn("- Referenced memory: ", preview.stdout)
+        prospective = self.relay(
+            project, "task", "capsule", task_id, "--raw", check=True,
+        ).stdout
+        expected_section = (
+            "## Referenced memory\n"
+            "Load full entries as needed with "
+            "`python3 .attention-relay/relay memory show ID`.\n"
+            "- M1000: Four-digit shared fact\n"
+            "- M001: First worker fact"
+        )
+        self.assertIn(expected_section, prospective)
+        self.assertEqual(prospective.count("- M1000: Four-digit shared fact"), 1)
+        self.assertGreater(
+            prospective.index("## Referenced memory"),
+            prospective.index("## Verification"),
+        )
+        for body in ("FIRST FULL BODY MUST NOT LEAK", "SECOND FULL BODY MUST NOT LEAK"):
+            self.assertNotIn(body, prospective)
+        module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_stored_memory_probe")
+        stored_result = module["stored_context_capsule_components"](prospective)
+        self.assertEqual(stored_result["text"], prospective)
+        self.assertIn("Referenced memory", dict(stored_result["section_chars"]))
+
+        self.relay(project, "run", task_id, check=True)
+        work = runtime / "work" / task_id
+        _digest, launch_capsule = (work / "attempt-1.brief.md").read_text().split(
+            "\n\n", 1,
+        )
+        prompt = (work / "attempt-1.prompt.md").read_text()
+        self.assertEqual(launch_capsule, prospective)
+        self.assertTrue(prompt.startswith(launch_capsule))
+        self.assertTrue(prompt.endswith(launch_capsule))
+        self.assertEqual(prompt.count(launch_capsule), 2)
+
+    def test_memory_reference_errors_fail_compile_preview_launch_and_validate(self):
+        project = self.make_project()
+        self.configure(project, self.write_worker(NO_CHANGE_WORKER))
+        self.write_memory(project, [
+            *[(f"M00{number}", "W", f"Worker fact {number}", "body")
+              for number in range(1, 8)],
+            ("M010", "O", "Orchestrator secret", "orchestrator body"),
+        ])
+        cases = [
+            ("unknown reference", "M999", "referenced memory id M999 is missing from memory.md"),
+            (
+                "orchestrator reference", "M010",
+                "referenced memory id M010 is orchestrator-only [O]; worker capsules "
+                "may reference only [W] or [B]",
+            ),
+            (
+                "too many references", "M001 M002 M003 M004 M005 M006 M007",
+                "Context references 7 memory entries; maximum is 6; split the task "
+                "or remove references",
+            ),
+        ]
+        runtime = project / ".attention-relay"
+        module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_memory_error_probe")
+        entries = module["memory_index_entries"]((runtime / "memory.md").read_text())
+        task_cases = []
+        for title, context, message in cases:
+            task_id = self.create_task(project, title, [f"{title.replace(' ', '-')}/**"])
+            spec_path = runtime / "tasks" / f"{task_id}.md"
+            spec_path.write_text(spec_path.read_text().replace(
+                "List the paths and facts the worker needs. Reference memory ids when useful.",
+                context,
+            ))
+            task_cases.append((task_id, spec_path, message))
+            with self.assertRaisesRegex(ValueError, re.escape(message)):
+                module["compile_context_capsule"](
+                    self.state(project, task_id), spec_path.read_text(), entries,
+                )
+            preview = self.relay(project, "task", "capsule", task_id)
+            launch = self.relay(project, "run", task_id)
+            self.assertNotEqual(preview.returncode, 0)
+            self.assertNotEqual(launch.returncode, 0)
+            self.assertIn(message, preview.stderr)
+            self.assertIn(message, launch.stderr)
+
+        validation = self.relay(project, "validate")
+        self.assertNotEqual(validation.returncode, 0)
+        for _task_id, _spec_path, message in task_cases:
+            self.assertIn(message, validation.stdout)
+
+    def test_memory_index_parser_is_strict_and_preserves_four_digit_ids(self):
+        module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_memory_parser_probe")
+        parse = module["memory_index_entries"]
+        valid = (
+            "# Memory\n\n## Index\n"
+            "- M1000 [B] Shared fact\n"
+            "- M001 [W] Worker fact\n\n"
+            "## Entries\n"
+        )
+        self.assertEqual(
+            parse(valid),
+            [("M1000", "B", "Shared fact"), ("M001", "W", "Worker fact")],
+        )
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            parse(valid.replace("- M001 [W] Worker fact", "- M01 [W] Worker fact"))
+        with self.assertRaisesRegex(ValueError, "duplicate id M1000"):
+            parse(valid.replace("M001 [W] Worker fact", "M1000 [W] Worker fact"))
+
+        project = self.make_project()
+        memory = project / ".attention-relay" / "memory.md"
+        memory.write_text(valid.replace("M001 [W] Worker fact", "M1000 [W] Worker fact"))
+        validation = self.relay(project, "validate")
+        self.assertNotEqual(validation.returncode, 0)
+        self.assertIn("memory index has duplicate id M1000", validation.stdout)
+
+    def test_no_reference_format_is_unchanged_and_memory_counts_toward_budget(self):
+        project = self.make_project()
+        self.write_memory(project, [
+            ("M001", "W", "A deliberately long summary for capsule budgeting", "body"),
+        ])
+        task_id = self.create_task(project, "format stability", ["stable/**"])
+        runtime = project / ".attention-relay"
+        module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_memory_budget_probe")
+        task = self.state(project, task_id)
+        spec_path = runtime / "tasks" / f"{task_id}.md"
+        spec = spec_path.read_text().replace(
+            "Complete the format stability task.",
+            "Complete the format stability task while mentioning M999 outside Context.",
+        )
+        entries = module["memory_index_entries"]((runtime / "memory.md").read_text())
+        capsule = module["compile_context_capsule"](task, spec, entries)
+        expected = (
+            "# Critical Context Capsule\n\n"
+            f"Task: {task_id}: format stability\n"
+            "Scope: stable/**\n\n"
+            "## Objective\nComplete the format stability task while mentioning M999 "
+            "outside Context.\n\n"
+            "## Acceptance criteria\n- The targeted task behavior is verified.\n\n"
+            "## Not allowed\n- No changes outside the task scope.\n"
+            "- No unrelated cleanup or new dependencies.\n\n"
+            "## Verification\n- Add exact, targeted commands."
+        )
+        self.assertEqual(capsule, expected)
+        self.assertNotIn("Referenced memory", capsule)
+
+        baseline = module["context_capsule_components"](task, spec, entries)
+        referenced_spec = spec.replace(
+            "List the paths and facts the worker needs. Reference memory ids when useful.",
+            "Load M001.",
+        )
+        referenced = module["context_capsule_components"](
+            task, referenced_spec, entries, baseline["chars"],
+        )
+        self.assertGreater(referenced["overflow"], 0)
+        self.assertIn("Referenced memory", dict(referenced["section_chars"]))
+        spec_path.write_text(referenced_spec)
+        self.configure(
+            project, self.write_worker(NO_CHANGE_WORKER),
+            capsule_max_chars=baseline["chars"],
+        )
+        preview = self.relay(project, "task", "capsule", task_id)
+        self.assertNotEqual(preview.returncode, 0)
+        self.assertIn("- Referenced memory: ", preview.stdout)
+        self.assertIn("capsule_max_chars=", preview.stderr)
+
+    def test_review_brief_warns_on_memory_drift_and_shows_launch_capsule(self):
+        project = self.make_project()
+        self.configure(project, self.write_worker(NO_CHANGE_WORKER))
+        self.write_memory(project, [
+            ("M001", "W", "Original launch summary", "body"),
+        ])
+        task_id = self.create_task(project, "review memory drift", ["review/**"])
+        runtime = project / ".attention-relay"
+        spec = runtime / "tasks" / f"{task_id}.md"
+        spec.write_text(spec.read_text().replace(
+            "List the paths and facts the worker needs. Reference memory ids when useful.",
+            "Use M001.",
+        ))
+        self.relay(project, "run", task_id, check=True)
+        _digest, stored_capsule = (
+            runtime / "work" / task_id / "attempt-1.brief.md"
+        ).read_text().split("\n\n", 1)
+        memory = runtime / "memory.md"
+        memory.write_text(memory.read_text().replace(
+            "Original launch summary", "Edited after launch summary",
+        ))
+
+        review, _token = self.review_brief_token(project, task_id)
+        warning = (
+            "WARNING: capsule inputs drifted since launch (spec or memory changed); "
+            "showing launch capsule"
+        )
+        self.assertTrue(review.stdout.startswith(stored_capsule + "\n"))
+        self.assertEqual(review.stdout.count(warning), 1)
+        self.assertIn("- M001: Original launch summary", review.stdout)
+        self.assertNotIn("Edited after launch summary", review.stdout)
 
     def test_memory_archive_and_prompt_spec_alignment(self):
         project = self.make_project()

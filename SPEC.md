@@ -214,10 +214,14 @@ task creation, run, review/accept, and session close.
 - `run` uses the read-only wave selection logic to print what would run and
   cautions for overlapping scopes or unmet dependencies.
 - `review ID` is valid only for a `needs_review` task. Under the task lock it
-  compiles the task capsule, prints current report and diff paths, declared and
-  observed changed paths, and an accept/return/decide checklist. It atomically
-  stores and prints a new `Review token: <value>` bound to task id and attempt;
-  issuing another review brief replaces the token.
+  freshly compiles the task capsule but displays the stored launch capsule when
+  `attempt-N.brief.md` exists. If the fresh and stored capsules differ, it prints
+  one bounded warning that spec or memory inputs drifted and that the launch
+  capsule is shown. With no stored brief it displays the fresh capsule. It also
+  prints current report and diff paths, declared and observed changed paths, and
+  an accept/return/decide checklist. It atomically stores and prints a new
+  `Review token: <value>` bound to task id and attempt; issuing another review
+  brief replaces the token.
 - `close` uses the same dedicated handoff leaf lock to atomically write the
   bounded `.attention-relay/orchestrator-handoff.md`, prints it, and reminds the
   orchestrator to start a fresh session. The template carries the newest goal,
@@ -310,12 +314,26 @@ its worker status with a structured `worker_exit_N_after_submission` warning in
 task state, status output, history, and the review brief.
 
 Before launch, Relay compiles a deterministic Critical Context Capsule from the
-task id, title, scope, and the existing `Objective`, `Acceptance criteria`, `Not
-allowed`, and `Verification` sections. The task spec remains the only
-hand-edited source; there is no capsule section in the task template. Empty
-objectives or acceptance criteria, and either section retaining its template
-placeholder line, are actionable launch errors. `validate` reports the same
-errors for queued tasks.
+task state, the existing `Objective`, `Acceptance criteria`, `Not allowed`,
+`Verification`, and retry sections, and the memory index at compile time. The
+same task state, spec text, and memory index produce byte-identical capsule text.
+The task spec remains the only hand-edited task source; there is no capsule
+section in the task template. Empty objectives or acceptance criteria, and
+either section retaining its template placeholder line, are actionable launch
+errors. `validate` reports the same errors for queued tasks.
+
+Relay scans only the spec's `Context` section for ordered, deduplicated
+`M\d{3,}` references. When any exist, the capsule includes `Referenced memory`
+after `Verification` and before `Retry delta`. It contains one instruction to
+load full entries with
+`python3 .attention-relay/relay memory show ID` and one
+`- M###: summary` line per reference. It never includes full memory bodies.
+With no references this section is absent and the capsule format is unchanged.
+More than six distinct references is an error that directs the orchestrator to
+split the task or remove references. A missing id or an orchestrator-only `[O]`
+reference is also an error; worker capsules accept only `[W]` and `[B]` entries.
+Compilation, launch, prospective preview, and queued-task validation report
+these errors without dropping or truncating references.
 
 On attempts after the first, the capsule also contains a `Retry delta` with only
 the newest entry from `Review feedback` and/or `Decisions`. The previous-attempt
@@ -323,7 +341,8 @@ report remains a file pointer in the middle of the prompt. Relay places the
 byte-identical capsule at the exact beginning and end of the launch prompt,
 around the task metadata, file pointers, and finish mechanics. It also writes
 that capsule to `work/<id>/attempt-N.brief.md` with its SHA-256 content digest.
-The same task state therefore produces byte-identical capsule text.
+This immutable launch snapshot is the audit record; worker phase briefs reread
+it without consulting mutable spec or memory text.
 
 Capsules are never truncated. If one exceeds `capsule_max_chars`, launch and
 validation fail with the measured size and overflow.
@@ -386,8 +405,13 @@ uses:
 - M003 [B] summary
 ```
 
-`W` is for workers, `O` for the orchestrator, and `B` for both. Full entries use
+Ids contain `M` followed by three or more digits. `W` is for workers, `O` for
+the orchestrator, and `B` for both. Index lines are parsed strictly in file
+order; malformed lines and duplicate ids are errors. Full entries use
 `### M001 ...` headings. Agents read the index and load only relevant entries.
+Task specs reference useful ids in `Context`; capsules carry their one-line
+worker-visible summaries, but agents still load full entries explicitly when
+needed.
 
 Commands:
 

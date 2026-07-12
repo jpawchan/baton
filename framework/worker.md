@@ -12,8 +12,9 @@ Do not re-enable memory injection unless the task spec says so.
 1. Read the task spec named in your launch prompt. The prompt begins and ends
    with the same generated Critical Context Capsule; re-read the closing copy
    before finishing so its requirements are fresh.
-2. Load only memory ids referenced by the spec:
-   `.attention-relay/relay memory show M001`
+2. The capsule includes summaries for memory ids referenced in the spec's
+   Context section. A summary is not the full entry; load each needed entry with
+   `.attention-relay/relay memory show M001`.
 3. Immediately before the first write, run
    `python3 .attention-relay/relay task brief ID --phase edit`, then make the
    smallest change that meets the acceptance criteria.

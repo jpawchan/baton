@@ -20,7 +20,8 @@ missed. The effect varies by model and task; read more in
 
 Attention Relay puts the same Critical Context Capsule at both ends of every
 worker prompt. The capsule carries the task's objective, acceptance criteria,
-restrictions, and verification commands. This placement does not guarantee
+restrictions, verification commands, and summaries of worker-visible memory ids
+referenced in the task's Context section. This placement does not guarantee
 quality, but it can make critical context easier to recover.
 
 Workers re-read the capsule before editing, verification, and reporting. The

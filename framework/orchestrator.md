@@ -111,9 +111,12 @@ For each task in `needs_review`, issue a fresh review brief:
 .attention-relay/relay orchestrator brief --phase review <id>
 ```
 
-It prints the task capsule, current report and diff paths, declared and observed
-paths, a review checklist, and `Review token: <value>`. Read the report and diff;
-read full files only when those artifacts are not enough.
+It prints the stored launch capsule when available, current report and diff
+paths, declared and observed paths, a review checklist, and
+`Review token: <value>`. If current spec or memory inputs would compile to a
+different capsule, it prints a drift warning while preserving the launch
+snapshot for review. Read the report and diff; read full files only when those
+artifacts are not enough.
 
 Compare the report with the diff. Check the verification evidence. For a retried
 task, review its earlier attempt diffs too; returning a task does not revert its
@@ -182,8 +185,10 @@ Store only durable project facts:
 ```
 
 Do not store task progress, logs, or facts already easy to find in the
-repository. Reference useful memory ids in task context instead of copying full
-entries.
+repository. Reference at most six useful worker-visible (`[W]` or `[B]`) memory
+ids in a task's Context section instead of copying full entries. Relay puts
+their one-line summaries in the generated capsule; workers still load full
+entries explicitly when needed.
 
 ## Commands
 

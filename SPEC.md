@@ -206,9 +206,12 @@ task creation, run, review/accept, and session close.
   says framework workers are already clean by default. The orchestrator relays
   these choices in its first response and never auto-applies one. Start also
   prints the current handoff when present, task counts, unresolved
-  decision/review ids, and one recommended next command. Under a dedicated
-  handoff leaf lock, it atomically marks the handoff consumed without deleting
-  it.
+  decision/review ids, and one recommended next command. Directly beneath the
+  ids-only decision line it prints at most two available worker questions,
+  flattened to one line, stripped of ANSI and C0/C1 controls, bounded to 160
+  characters, and labeled `worker question:`. A decision recommendation always
+  names a real task id, never an overflow marker. Under a dedicated handoff leaf
+  lock, start atomically marks the handoff consumed without deleting it.
 - `plan` prints the task-spec quality checklist and a bounded queued/blocked
   dependency graph.
 - `run` uses the read-only wave selection logic to print what would run and
@@ -261,9 +264,14 @@ rejected. Return, decide, and cancel remove any review token and manifest. With
 the gate disabled, accept bypasses the manifest exactly as it bypasses `--brief`.
 
 `relay status`, `relay task show`, and each real `relay run` end with a
-deterministic `Next actions` block of at most about six lines. It derives review
-report paths, decision ids, or create/run commands from current task state and
-contains no generic advice.
+deterministic `Next actions` block whose heading is followed by at most five
+content lines globally across reviews, decisions, and overflow markers. Reviews
+come first, followed by one line per displayed decision; overflow markers remain
+within the same budget. Each available decision question is flattened to one
+line, stripped of ANSI and C0/C1 controls, bounded to 160 characters, and
+explicitly labeled `worker question:`; a missing or non-text question leaves an
+id-only decision line. The block otherwise derives report paths or create/run
+commands from current task state and contains no generic advice.
 
 ## Optional Claude Code integration
 

@@ -621,6 +621,130 @@ class RelayTests(unittest.TestCase):
         spec = project / ".attention-relay" / "tasks" / f"{task_id}.md"
         self.assertIn("Use option A", spec.read_text())
 
+    def test_decision_question_text_is_sanitized_flattened_and_exactly_bounded(self):
+        module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_decision_text_probe")
+        flatten = module["flatten_bounded_text"]
+        raw = (
+            "\x1b]terminal title\x07 First\r\n\t\x1b[31msecond\x1b[0m"
+            "\v\f\x85third\x00tail " + "x" * 200
+        )
+        clean = "First second thirdtail " + "x" * 200
+        bounded = flatten(raw, 32)
+        self.assertEqual(bounded, clean[:31] + "…")
+        self.assertEqual(len(bounded), 32)
+        self.assertEqual(flatten("  one\n\ttwo  ", 160), "one two")
+        self.assertEqual(flatten({"not": "text"}, 160), "")
+        self.assertEqual(flatten("", 160), "")
+
+        history_note = "Question recovered from history?"
+        task = {
+            "last_note": "Current worker question?",
+            "history": [{
+                "event": "worker_exited", "status": "needs_decision",
+                "note": history_note,
+            }],
+        }
+        self.assertEqual(module["decision_question"](task), "Current worker question?")
+        task["last_note"] = {"not": "text"}
+        self.assertEqual(module["decision_question"](task), history_note)
+        task["history"][0]["note"] = {"not": "text"}
+        self.assertEqual(module["decision_question"](task), "")
+
+    def test_next_actions_and_status_inline_bounded_worker_questions(self):
+        project = self.make_project()
+        reviews = [self.create_task(project, f"review {index}") for index in range(4)]
+        decisions = [self.create_task(project, f"decision {index}") for index in range(3)]
+        runtime = project / ".attention-relay"
+        raw_question = (
+            "Choose\n\x1b[31moption\x1b[0m \x00\x85 carefully: " + "x" * 200
+        )
+
+        for task_id in reviews:
+            path = runtime / "tasks" / f"{task_id}.json"
+            task = json.loads(path.read_text())
+            task["status"] = "needs_review"
+            path.write_text(json.dumps(task))
+        for index, task_id in enumerate(decisions):
+            path = runtime / "tasks" / f"{task_id}.json"
+            task = json.loads(path.read_text())
+            question = raw_question if index == 0 else f"Question {index}?"
+            task["status"] = "needs_decision"
+            task["last_note"] = question
+            task["history"].append({
+                "event": "worker_exited", "status": "needs_decision", "note": question,
+            })
+            path.write_text(json.dumps(task))
+
+        status = self.relay(project, "status", check=True)
+        self.assertNotIn("\x1b", status.stdout)
+        self.assertNotIn("\x00", status.stdout)
+        self.assertIn(" - worker question: Choose option carefully: ", status.stdout)
+        actions = status.stdout.rsplit("Next actions:\n", 1)[1].splitlines()
+        self.assertLessEqual(len(actions), 5)
+        self.assertTrue(all(line.startswith("- review") for line in actions[:3]))
+        self.assertEqual(actions[2], "- review: +2 more")
+        self.assertTrue(actions[3].startswith(
+            f"- decide {decisions[0]}: worker question: Choose option carefully: ",
+        ))
+        rendered_question = actions[3].split("worker question: ", 1)[1]
+        self.assertEqual(len(rendered_question), 160)
+        self.assertTrue(rendered_question.endswith("…"))
+        self.assertEqual(actions[4], "- decide: +2 more")
+
+        fallback_project = self.make_project("decision-fallback")
+        fallback = self.create_task(fallback_project, "missing question")
+        fallback_path = (
+            fallback_project / ".attention-relay" / "tasks" / f"{fallback}.json"
+        )
+        fallback_task = json.loads(fallback_path.read_text())
+        fallback_task["status"] = "needs_decision"
+        fallback_task["last_note"] = {"not": "text"}
+        fallback_task["history"].append({
+            "event": "worker_exited", "status": "needs_decision", "note": None,
+        })
+        fallback_path.write_text(json.dumps(fallback_task))
+        fallback_status = self.relay(fallback_project, "status", check=True)
+        self.assertIn(f"\n- decide {fallback}\n", fallback_status.stdout)
+        self.assertNotIn("worker question:", fallback_status.stdout)
+
+    def test_start_brief_bounds_questions_and_recommends_a_real_decision_id(self):
+        project = self.make_project()
+        decisions = [self.create_task(project, f"start decision {index}") for index in range(5)]
+        runtime = project / ".attention-relay"
+        for index, task_id in enumerate(decisions):
+            path = runtime / "tasks" / f"{task_id}.json"
+            task = json.loads(path.read_text())
+            question = f"Worker\nquestion \x1b[31m{index}\x1b[0m?"
+            task["status"] = "needs_decision"
+            task["last_note"] = question
+            task["history"].append({
+                "event": "worker_exited", "status": "needs_decision", "note": question,
+            })
+            path.write_text(json.dumps(task))
+
+        started = self.relay(
+            project, "orchestrator", "brief", "--phase", "start", check=True,
+        )
+        decision_block = started.stdout.split("Needs decision: ", 1)[1].split(
+            "Needs review:", 1,
+        )[0]
+        self.assertIn("+1 more", decision_block.splitlines()[0])
+        question_lines = [
+            line for line in decision_block.splitlines() if "worker question:" in line
+        ]
+        self.assertEqual(len(question_lines), 2)
+        self.assertEqual(
+            question_lines[0], f"- {decisions[0]}: worker question: Worker question 0?",
+        )
+        self.assertEqual(
+            question_lines[1], f"- {decisions[1]}: worker question: Worker question 1?",
+        )
+        self.assertIn(
+            f"Recommended next command: relay task decide {decisions[0]} --answer ANSWER",
+            started.stdout,
+        )
+        self.assertNotIn("relay task decide +1 more", started.stdout)
+
     def test_worker_role_and_live_runner_guards(self):
         project = self.make_project()
         worker = self.write_worker(GOOD_WORKER)
@@ -1460,12 +1584,24 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(session.returncode, 0)
         self.assertEqual(session.stderr, "")
         self.assertEqual(session.stdout, brief.stdout)
+        decision = self.create_task(project, "hook decision")
+        decision_path = (
+            project / ".attention-relay" / "tasks" / f"{decision}.json"
+        )
+        decision_task = json.loads(decision_path.read_text())
+        question = "May we\n\x1b[31mchange\x1b[0m the interface?"
+        decision_task["status"] = "needs_decision"
+        decision_task["last_note"] = question
+        decision_task["history"].append({
+            "event": "worker_exited", "status": "needs_decision", "note": question,
+        })
+        decision_path.write_text(json.dumps(decision_task))
         prompt = subprocess.run(
             [
                 project / ".attention-relay" / "relay", "hook-event",
                 "user-prompt-submit",
             ],
-            cwd=project, input="{}", text=True, capture_output=True,
+            cwd=project, input="{malformed", text=True, capture_output=True,
         )
         self.assertEqual(prompt.returncode, 0)
         self.assertLessEqual(len(prompt.stdout), 9000)
@@ -1475,6 +1611,10 @@ class RelayTests(unittest.TestCase):
         self.assertTrue(specific["additionalContext"].startswith(
             "attention-relay state:\nNext actions:\n",
         ))
+        self.assertIn(
+            f"- decide {decision}: worker question: May we change the interface?",
+            specific["additionalContext"],
+        )
 
         module = runpy.run_path(str(SOURCE_RELAY), run_name="relay_hook_cap_probe")
         capped = module["cap_hook_output"]("first\n" + "x" * 10000 + "\nlast\n")

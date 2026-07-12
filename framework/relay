@@ -482,6 +482,21 @@ def sanitize_log_text(text):
     return CONTROL_RE.sub("", text)
 
 
+def flatten_bounded_text(value, limit):
+    """Flatten untrusted text after removing terminal and C0/C1 controls."""
+    if not isinstance(value, str) or not value or limit <= 0:
+        return ""
+    text = ANSI_OSC_RE.sub("", value)
+    text = ANSI_STRING_RE.sub("", text)
+    text = ANSI_CSI_RE.sub("", text)
+    text = ANSI_ESCAPE_RE.sub("", text)
+    text = CONTROL_RE.sub("", re.sub(r"\s+", " ", text))
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[:limit - 1] + "…"
+    return text
+
+
 def bounded_log_tail(path, byte_limit=64 * 1024, line_limit=15):
     """Read and sanitize only a bounded final-byte window from an attempt log."""
     descriptor = None
@@ -1177,21 +1192,63 @@ def bounded_ids(tasks, statuses, limit=4):
     return ids
 
 
+def decision_question(task):
+    latest = latest_worker_exit(task)
+    if latest.get("status") == "needs_decision":
+        note = task.get("last_note")
+        if isinstance(note, str) and note:
+            return note
+    for entry in reversed(task.get("history", [])):
+        if entry.get("event") == "worker_exited" and entry.get("status") == "needs_decision":
+            note = entry.get("note")
+            return note if isinstance(note, str) and note else ""
+    return ""
+
+
 def render_next_actions(relay_dir):
     tasks = load_all_tasks(relay_dir)
-    review = [task for task in tasks if task.get("status") == "needs_review"]
-    decisions = bounded_ids(tasks, {"needs_decision"}, limit=3)
+    reviews = [task for task in tasks if task.get("status") == "needs_review"]
+    decisions = [task for task in tasks if task.get("status") == "needs_decision"]
     lines = ["Next actions:"]
-    for task in review[:3]:
+
+    review_count = len(reviews)
+    decision_count = len(decisions)
+    review_shown = decision_shown = 0
+    for possible_reviews in range(min(review_count, 5), -1, -1):
+        if review_count and not possible_reviews:
+            continue
+        for possible_decisions in range(min(decision_count, 5), -1, -1):
+            if decision_count and not possible_decisions:
+                continue
+            content_lines = (
+                possible_reviews + possible_decisions
+                + (possible_reviews < review_count)
+                + (possible_decisions < decision_count)
+            )
+            if content_lines <= 5:
+                review_shown = possible_reviews
+                decision_shown = possible_decisions
+                break
+        else:
+            continue
+        break
+
+    for task in reviews[:review_shown]:
         path = report_path(relay_dir, task["id"], task.get("attempt", 1))
         lines.append("- review {}: {}".format(
             task["id"], os.path.relpath(path, project_root(relay_dir)),
         ))
-    if len(review) > 3:
-        lines.append("- review: +{} more".format(len(review) - 3))
-    if decisions:
-        lines.append("- decide: " + ", ".join(decisions))
-    if not review and not decisions:
+    if review_shown < review_count:
+        lines.append("- review: +{} more".format(review_count - review_shown))
+    for task in decisions[:decision_shown]:
+        question = flatten_bounded_text(decision_question(task), 160)
+        line = "- decide " + task["id"]
+        if question:
+            line += ": worker question: " + question
+        lines.append(line)
+    if decision_shown < decision_count:
+        lines.append("- decide: +{} more".format(decision_count - decision_shown))
+    if not reviews and not decisions:
         if any(task.get("status") == "queued" for task in tasks):
             lines.append("- run: relay orchestrator brief --phase run")
             lines.append("- then: relay run")
@@ -1637,12 +1694,21 @@ def orchestrator_start_brief(relay_dir, tasks, consume_handoff=True):
     say("\nTask counts: " + (
         ", ".join("{}={}".format(*item) for item in sorted(counts.items())) or "none"
     ))
+    decision_tasks = [task for task in tasks if task.get("status") == "needs_decision"]
     decisions = bounded_ids(tasks, {"needs_decision"})
     reviews = bounded_ids(tasks, {"needs_review"})
     say("Needs decision: " + (", ".join(decisions) or "none"))
+    shown_questions = 0
+    for task in decision_tasks:
+        question = flatten_bounded_text(decision_question(task), 160)
+        if question:
+            say("- {}: worker question: {}".format(task["id"], question))
+            shown_questions += 1
+            if shown_questions == 2:
+                break
     say("Needs review: " + (", ".join(reviews) or "none"))
-    if decisions:
-        command = "relay task decide {} --answer ANSWER".format(decisions[0])
+    if decision_tasks:
+        command = "relay task decide {} --answer ANSWER".format(decision_tasks[0]["id"])
     elif reviews:
         command = "relay orchestrator brief --phase review {}".format(reviews[0])
     elif any(task.get("status") == "queued" for task in tasks):
@@ -2707,10 +2773,16 @@ def cmd_status(args):
             state = "alive" if pid_alive(pid) else "STALE"
             say("  running: {} pid={} {}".format(task["id"], pid, state))
         elif task["status"] in WORKER_FINAL:
-            note = " - " + task["last_note"] if task.get("last_note") else ""
+            note_text = flatten_bounded_text(task.get("last_note"), 160)
+            note = " - " + note_text if note_text else ""
+            question = ""
+            if task["status"] == "needs_decision":
+                question_text = flatten_bounded_text(decision_question(task), 160)
+                if question_text:
+                    question = " - worker question: " + question_text
             warning = " - WARNING: " + task["warning"] if task.get("warning") else ""
-            say("  attention: {} ({}){}{}".format(
-                task["id"], task["status"], note, warning,
+            say("  attention: {} ({}){}{}{}".format(
+                task["id"], task["status"], note, question, warning,
             ))
     say_next_actions(relay_dir)
 

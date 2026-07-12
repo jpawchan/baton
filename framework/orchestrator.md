@@ -22,6 +22,11 @@ From the project root, run the start brief FIRST:
 In your first response, relay the brief's `Harness memory` section to the user
 and let them choose before planning. Do not auto-apply any harness change.
 
+The start brief keeps `Needs decision:` ids-only, then shows at most two
+available questions directly beneath it as sanitized, single-line, 160-character
+`worker question:` data. Its recommended decision command always names a real
+task id rather than a `+N more` marker.
+
 Load only memory entries relevant to the current goal.
 
 Treat `orchestrator.md` and `worker.md` as read-only instructions. Task specs
@@ -40,11 +45,13 @@ it into the project's existing settings without replacing other hooks:
 
 The `SessionStart` hook injects the start-phase orchestrator brief as context.
 The `UserPromptSubmit` hook injects a bounded, state-derived `Next actions`
-capsule before Claude handles each prompt. Hook output is capped below Claude's
-context limit. The adapter fails open with no output when Relay state is missing
-or broken, so it never prevents a Claude session, and it does not write Relay
-state. Do not launch Claude with `--bare` when using this integration: `--bare`
-disables hooks.
+capsule before Claude handles each prompt. That capsule uses one global budget
+of five content lines for reviews, decisions, and overflow markers; decision
+lines include available sanitized, single-line, 160-character questions labeled
+`worker question:`. Hook output is capped below Claude's context limit. The
+adapter fails open with no output when Relay state is missing or broken, so it
+never prevents a Claude session, and it does not write Relay state. Do not launch
+Claude with `--bare` when using this integration: `--bare` disables hooks.
 
 ## Create tasks
 
@@ -184,7 +191,8 @@ marks it consumed without deleting it.
   and attempt log in the review brief before accepting or returning the task.
 - `blocked`: read `attempt-N.violations.diff` when present, restore every
   out-of-scope path, resolve any other blocker, then return the task.
-- `needs_decision`: answer with `task decide`.
+- `needs_decision`: read the labeled worker question in status, the start brief,
+  or `Next actions`, then answer with `task decide`.
 - stale `running`: confirm the process is gone, then use `task unlock`.
 
 A timed-out, interrupted, launch-failed, or invalid worker is marked failed even

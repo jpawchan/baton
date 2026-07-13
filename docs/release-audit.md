@@ -313,10 +313,6 @@ In addition to the full suite:
   `.gitignore`, which is a harmless legacy-runtime compatibility ignore; the
   `.attention-relay/` ignore and benchmark exclusion refer to this audit harness,
   not the shipped `.baton/` runtime.
-- Existing `v2.0.0` and `v2.1.0` tag annotations use the historical
-  attention-relay name. They are historical metadata, not current canonical
-  documentation; do not delete or retag them.
-
 README's runtime, dependency, command, hook, safety, worker-routing, activation,
 and repository-map claims follow the inspected code or the explicitly limited
 research/provider evidence. The dead clone URL and unsupported RSS claim are
@@ -369,7 +365,7 @@ contributor: `jpawchan` with 20 contributions. There are no GitHub releases.
    git remote set-url origin https://github.com/jpawchan/baton.git
    ```
 
-4. Verify, before any release tag or announcement:
+4. Verify before publication:
 
    ```text
    gh repo view jpawchan/baton --json nameWithOwner,url,description,defaultBranchRef
@@ -378,9 +374,8 @@ contributor: `jpawchan` with 20 contributions. There are no GitHub releases.
    ```
 
    Also perform a disposable unauthenticated clone and run the documented install
-   smoke. Keep old annotated tags as historical tags; create the chosen new Baton
-   release tag only after the clean final verification, without moving or deleting
-   existing tags.
+   smoke. Publish any release announcement only after the clean final
+   verification.
 
 These operations leave history intact and preserve GitHub's existing sole
 `jpawchan` contributor mapping.

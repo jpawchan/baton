@@ -21,8 +21,7 @@ in-place GitHub rename is intentionally deferred. That is a publication
 operation, not a source defect.
 
 Publication must still perform the exact remote operations in “Deferred
-publication operations” and pass the post-publication checks. Existing
-historical tags `v2.0.0` and `v2.1.0` must not be moved or deleted.
+publication operations” and pass the post-publication checks.
 
 ## Blocking defects
 
@@ -302,9 +301,6 @@ tag, branch, remote, push, or GitHub setting was changed.
   it is not an OS sandbox.
 - Provider token evidence is revision-bound. Re-measure through the real
   harness paths whenever an included activation artifact changes.
-- Historical tag annotations retain the old project name. They are historical
-  metadata and should remain untouched.
-
 ## Deferred publication operations
 
 After this GO report is independently reviewed and accepted:
@@ -331,12 +327,9 @@ After this GO report is independently reviewed and accepted:
    git push origin main
    ```
 
-5. Do not move or delete `v2.0.0` or `v2.1.0`. Choose and create any new Baton
-   release tag only after the post-publication checks below pass.
-
 ## Post-publication verification
 
-Before tagging or announcing:
+Before announcing a release:
 
 1. Confirm owner/name, URL, description, and default branch:
 
@@ -357,8 +350,6 @@ Before tagging or announcing:
    → status → validate smoke.
 3. Recheck all local links/map paths and external URLs; the README and skill
    Baton URL must now return 200 rather than the one expected pre-rename 404.
-4. Confirm `git status --short` is empty, local `main` equals `origin/main`,
-   `.mailmap` still yields one canonical author and committer identity, and
-   existing tag object ids are unchanged.
-5. Only then create the chosen new release tag and announcement, without
-   altering historical tags.
+4. Confirm `git status --short` is empty, local `main` equals `origin/main`, and
+   `.mailmap` still yields one canonical author and committer identity.
+5. Only then publish the release announcement.

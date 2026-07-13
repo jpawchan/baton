@@ -1,1 +1,1 @@
-Delegate scoped coding tasks to fresh CLI agents with generated context capsules, parallel scheduling, and evidence-bound diff review.
+Baton coordinates coding agents. Each worker handles a focused task, and one orchestrator checks the result.

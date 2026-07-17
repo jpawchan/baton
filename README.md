@@ -95,6 +95,11 @@ framework/baton init /path/to/project
 | `SPEC.md` | Normative behavior and safety contract. |
 | `summary.md` | Code-verified maintainer guide. |
 
+
+## Tech used
+
+Hermes, claude code, codex, gpt 5.6 sol, fable 5
+
 ## License
 
 [MIT License](LICENSE).

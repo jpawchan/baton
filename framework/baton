@@ -3206,8 +3206,8 @@ def working_tree_state(root):
                     "git", "-C", root, "status", "--porcelain=v1",
                     "--untracked-files=normal", "--ignore-submodules=none",
                 ],
-                env=env, stdout=output, stderr=subprocess.DEVNULL,
-                timeout=5,
+                env=env, stdin=subprocess.DEVNULL, stdout=output,
+                stderr=subprocess.DEVNULL, timeout=5,
             )
             if result.returncode:
                 return None
@@ -3598,7 +3598,7 @@ def git_run(root, *arguments, env=None, text=True):
     try:
         return subprocess.run(
             ["git", "-C", root, *arguments], env=env,
-            capture_output=True, text=text,
+            stdin=subprocess.DEVNULL, capture_output=True, text=text,
         )
     except FileNotFoundError:
         die("Git is required")
@@ -3839,7 +3839,7 @@ def run_one_worker(baton_dir, prepared, timeout_minutes, stop_event):
         with open(prepared["log_path"], "w", encoding="utf-8") as log:
             process = subprocess.Popen(
                 prepared["argv"], cwd=root, env=environment,
-                stdout=log, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
             if stop_event.is_set():
@@ -3920,6 +3920,20 @@ def worker_changed_paths(value):
     if normalized != value:
         return None
     return normalized
+
+
+def worker_left_no_evidence(baton_dir, task_id, attempt):
+    """Report whether an attempt left no log output and recorded no phase brief."""
+    log = os.path.join(work_dir(baton_dir, task_id), "attempt-%d.log" % attempt)
+    try:
+        if os.path.getsize(log) > 0:
+            return False
+    except OSError:
+        pass
+    receipts = read_phase_receipts(
+        phase_receipts_path(baton_dir, task_id, attempt), task_id, attempt,
+    )
+    return not (receipts and receipts["phases"])
 
 
 def finalize_task(
@@ -4026,6 +4040,16 @@ def finalize_task(
     say("[{}] {}{}".format(
         task["id"], status, " ({})".format(note) if note else "",
     ))
+    if status == "failed" and note == "worker_timeout" and worker_left_no_evidence(
+            baton_dir, task["id"], attempt):
+        say(
+            "[{}] the worker produced no output and recorded no phase brief, "
+            "so it probably never started.".format(task["id"])
+        )
+        say(
+            "[{}] check that the worker command runs standalone and does not "
+            "wait on standard input.".format(task["id"])
+        )
     return True
 
 

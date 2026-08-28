@@ -484,6 +484,8 @@ shell. It must contain exactly one complete `{prompt}` or `{prompt_file}`
 argument. Shell operators are not supported; users can call a wrapper script
 when needed.
 
+The worker's standard input is `/dev/null`. Workers are non-interactive and must never block on input.
+
 Baton exports:
 
 ```text

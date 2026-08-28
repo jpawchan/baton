@@ -27,6 +27,14 @@ AUTHOR_EMAIL = "78247292+jpawchan@users.noreply.github.com"
 BATON_ENVIRONMENT_KEYS = (
     "BATON_TASK_ID", "BATON_ATTEMPT", "BATON_LEASE", "BATON_DIR", "BATON_ROOT",
 )
+NEVER_STARTED_ADVISORY = (
+    "the worker produced no output and recorded no phase brief, "
+    "so it probably never started."
+)
+NEVER_STARTED_STDIN_ADVISORY = (
+    "check that the worker command runs standalone and does not "
+    "wait on standard input."
+)
 
 
 def clean_test_environment(overrides=None):
@@ -158,6 +166,13 @@ import time
 marker = os.environ["LATE_MARKER"]
 subprocess.Popen([sys.executable, "-c",
                   "import pathlib,time; time.sleep(0.6); pathlib.Path(%r).write_text('late')" % marker])
+time.sleep(10)
+'''
+
+
+SILENT_TIMEOUT_WORKER = r'''
+import time
+
 time.sleep(10)
 '''
 
@@ -7029,6 +7044,109 @@ result = json.loads(result_path.read_text())
         state = self.state(project, task_id)
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state["last_note"], "worker_timeout")
+
+    def test_worker_does_not_inherit_orchestrator_stdin(self):
+        project = self.make_project()
+        worker = self.write_worker("import sys\n\nsys.stdin.read()\n" + GOOD_WORKER)
+        self.configure(project, worker, max_parallel=1)
+        task_id = self.create_task(project, "stdin insulation", ["src/**"])
+        read_end, write_end = os.pipe()
+        try:
+            result = subprocess.run(
+                [str(project / ".baton" / "baton"), "run", task_id],
+                cwd=project, env=clean_test_environment(), text=True,
+                stdin=read_end, capture_output=True, timeout=15,
+            )
+        finally:
+            os.close(read_end)
+            os.close(write_end)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = self.state(project, task_id)
+        self.assertEqual(
+            state["status"], "needs_review", result.stdout + result.stderr,
+        )
+        self.assertNotIn(NEVER_STARTED_ADVISORY, result.stdout)
+
+    def test_run_one_worker_launches_the_worker_with_devnull_stdin(self):
+        project = self.make_project()
+        runtime = project / ".baton"
+        module = runpy.run_path(str(SOURCE_BATON), run_name="baton_worker_stdin_probe")
+        recorded = {}
+
+        class PopenRecorder:
+            def __init__(self, argv, **kwargs):
+                recorded["argv"] = argv
+                recorded["kwargs"] = kwargs
+                self.pid = None
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        @contextmanager
+        def unlocked(*_args):
+            yield
+
+        task = {
+            "id": "T900-stdin", "attempt": 1, "status": "running",
+            "runner": {"lease": "stdin-probe-lease"},
+        }
+        globals_ = module["run_one_worker"].__globals__
+        globals_["subprocess"] = SimpleNamespace(
+            Popen=PopenRecorder, DEVNULL=subprocess.DEVNULL,
+            STDOUT=subprocess.STDOUT, TimeoutExpired=subprocess.TimeoutExpired,
+        )
+        globals_["say"] = lambda *_args: None
+        globals_["task_lock"] = unlocked
+        globals_["load_task"] = lambda *_args: dict(task, runner=dict(task["runner"]))
+        globals_["save_task"] = lambda *_args: None
+
+        log_path = runtime / "work" / task["id"] / "attempt-1.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        prepared = {
+            "task": task, "lease": task["runner"]["lease"],
+            "argv": [sys.executable, "-c", "pass"], "log_path": str(log_path),
+            "routing_label": "T900-stdin | stdin probe",
+        }
+        outcome = module["run_one_worker"](
+            str(runtime), prepared, 0, threading.Event(),
+        )
+        self.assertEqual(outcome, {"returncode": 0})
+        self.assertEqual(recorded["argv"], prepared["argv"])
+        self.assertEqual(recorded["kwargs"]["stdin"], subprocess.DEVNULL)
+
+    def test_worker_timeout_without_evidence_reports_never_started(self):
+        project = self.make_project()
+        worker = self.write_worker(SILENT_TIMEOUT_WORKER)
+        self.configure(project, worker, max_parallel=1, timeout_minutes=0.005)
+        task_id = self.create_task(project, "never started", ["src/**"])
+        result = self.baton(project, "run", task_id, check=True)
+        work = project / ".baton" / "work" / task_id
+        self.assertEqual((work / "attempt-1.log").stat().st_size, 0)
+        self.assertFalse((work / "attempt-1.briefs.json").exists())
+        state = self.state(project, task_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["last_note"], "worker_timeout")
+        self.assertIn(NEVER_STARTED_ADVISORY, result.stdout)
+        self.assertIn(NEVER_STARTED_STDIN_ADVISORY, result.stdout)
+
+    def test_worker_timeout_with_evidence_omits_never_started_advisory(self):
+        project = self.make_project()
+        worker = self.write_worker(GOOD_WORKER)
+        self.configure(project, worker, max_parallel=1, timeout_minutes=0.02)
+        task_id = self.create_task(project, "evidence before timeout", ["src/**"])
+        result = self.baton(
+            project, "run", task_id, env={"SLEEP_AFTER_FINISH": "10"}, check=True,
+        )
+        work = project / ".baton" / "work" / task_id
+        self.assertTrue((work / "attempt-1.briefs.json").exists())
+        state = self.state(project, task_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["last_note"], "worker_timeout")
+        self.assertNotIn(NEVER_STARTED_ADVISORY, result.stdout)
+        self.assertNotIn(NEVER_STARTED_STDIN_ADVISORY, result.stdout)
 
     def test_interrupt_stops_workers_without_waiting_for_timeout(self):
         for signum in (signal.SIGINT, signal.SIGTERM):

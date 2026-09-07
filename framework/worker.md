@@ -20,12 +20,16 @@ says so.
    `python3 .baton/baton task brief ID --phase edit`, then make the
    smallest change that meets the acceptance criteria.
 4. Immediately before verification, run
-   `python3 .baton/baton task brief ID --phase verify`, then run the
-   targeted verification commands from the spec.
+   `python3 .baton/baton task brief ID --phase verify`. Exercise a falsifiable
+   regression for the changed behavior, then run the smallest relevant checks
+   from the spec; leave broad suites to integration unless the spec or risk
+   requires them.
 5. Immediately before writing the report, run
    `python3 .baton/baton task brief ID --phase report`. Write the
    report to the path in the launch prompt and list every exact changed
-   project-relative path.
+   project-relative path. Declare only the net Git-visible paths changed in the
+   CURRENT attempt, excluding prior attempts and pre-existing dirty work; do not
+   copy `git status` or `git diff HEAD` as the changed-path list.
 6. Submit the result with the
    `python3 .baton/baton task finish --brief TOKEN` command in the
    prompt, using the token from the report-phase brief and repeating
@@ -50,7 +54,9 @@ finish token, so run the report brief again before finishing.
 - Do not spawn agents or ask the user. Submit `needs_decision` with the question.
 - Use `blocked` for missing credentials or broken external systems.
 - Do not run orchestrator commands such as `accept`, `return`, or `run`.
-- Report failed checks and risks. Never include secrets.
+- Report failed checks and risks. On retry, use their evidence to correct the
+  failed assumption, implementation, or check rather than repeating blindly.
+  Never include secrets.
 
 Baton keeps the task running until your process exits. Calling `task finish`
 submits your result; it does not approve the task. If the process then exits

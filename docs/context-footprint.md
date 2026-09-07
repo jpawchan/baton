@@ -64,26 +64,32 @@ Two independent fresh temporary installs produced identical metrics and hashes:
 
 | Artifact | Characters | Bytes | Lines | SHA-256 |
 | --- | ---: | ---: | ---: | --- |
-| activation instructions | 1,033 | 1,033 | 17 | `5a0920da78cc41247cd64da1e8d2c5ec78599f79cc59c05b85507e32f04d7b73` |
-| installed orchestrator manual | 16,993 | 16,995 | 349 | `bafd62c71b8ecf0dd2ae46abb587e9c2cc45afad14099c0e8ab0ef7f0dddbf9e` |
+| activation instructions | 1,407 | 1,407 | 21 | `27d1a5e8a87d806db9fd8abfcb93c7f81a146773a64197da0125e3c79715abcf` |
+| installed orchestrator manual | 11,965 | 11,967 | 198 | `56016cbd12fb9ff43ab53a5fa91338494214542178cef11590937f5a1868b5b6` |
 | generated configured start brief | 601 | 601 | 13 | `58e9d61ddab7da8916e9737067f4de095e7d53eb66b4a8e356b72b160ea0bbe6` |
-| **Total** | **18,627** | **18,629** | **379** | `d04ab63b6f0ee5602965795d0aa670060dbffe765580d8cb55b34ac092dd3571` |
+| **Total** | **13,973** | **13,975** | **232** | `42c487228f319661bcddc6d297f5eef1d6d87cb76c6203b6617c5116ce57211b` |
 
 These values are revision-specific. Re-run the script whenever the activation
 prompt, installed manual, or start brief changes rather than carrying this table
 forward as an estimate.
 
+Compared with baseline revision `a65c4d5` (18,629 bytes; 4,658 estimated tokens
+under the same bytes/4 heuristic), this revision is 4,654 UTF-8 bytes smaller.
+Its estimate is 3,494 tokens, a reduction of 1,164 estimated tokens. These are
+byte and heuristic-estimate deltas, not provider-reported token savings, quality
+gains, or end-to-end performance measurements.
+
 ## Model-aware token result
 
-No live provider differential was collected for the exact 18,629-byte payload
+No live provider differential was collected for the exact 13,975-byte payload
 above. The preceding payload's genuine provider evidence remains in
 `tools/context-provider-differential.json` with `status: retired`; the default
 result does not load it, and explicit loading rejects it. This avoids fabricating
 new precision by adding an estimated delta to old token counts.
 
 The current result is explicitly labeled `ESTIMATE`: `ceil(bytes / 4)` gives
-4,658 estimated tokens, with a deliberately broad conservative range from
-`ceil(bytes / 6)` through `ceil(bytes / 2)`, or 3,105–9,315 tokens, for either
+3,494 estimated tokens, with a deliberately broad conservative range from
+`ceil(bytes / 6)` through `ceil(bytes / 2)`, or 2,330–6,988 tokens, for either
 named model path. Matching fallback values do not imply matching tokenization;
 the heuristic only measures the same UTF-8 bytes. A similarly named tokenizer,
 generic GPT encoding, or third-party Claude approximation is not authoritative
@@ -116,7 +122,7 @@ billing total as though both used the same boundary.
 Activation is overhead. A coding goal likely to consume fewer tokens than this
 activation footprint is usually better executed directly rather than delegated
 through Baton. Without current live provider evidence, compare the likely direct
-goal against the 4,658-token offline estimate while keeping its 3,105–9,315
-range visible. Baton is most defensible when task decomposition, fresh-worker
-focus, parallelism, and review are expected to save enough context to exceed
-that overhead or to provide quality and risk-control benefits worth the cost.
+goal against the 3,494-token offline estimate while keeping its 2,330–6,988 range
+visible. Baton is most defensible when task decomposition, fresh-worker focus,
+parallelism, and review are expected to save enough context to exceed that
+overhead or to provide quality and risk-control benefits worth the cost.

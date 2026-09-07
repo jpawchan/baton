@@ -2337,6 +2337,15 @@ def cmd_task_return(args):
                         "restore scope-violating paths before returning: "
                         + ", ".join(unresolved)
                     )
+            previous_tier = task.get("tier")
+            requested_tier = getattr(args, "tier", None)
+            changed_tier = requested_tier is not None and requested_tier != previous_tier
+            if requested_tier is not None:
+                tier = configured_tier(load_config(baton_dir), requested_tier)
+                validate_worker_executable(
+                    tier["command"], project_root(baton_dir),
+                )
+                task["tier"] = requested_tier
             previous_attempt = task.get("attempt", 1)
             publish_retry_context(
                 baton_dir, task["id"], "return", previous_attempt, "Review feedback",
@@ -2349,7 +2358,13 @@ def cmd_task_return(args):
             task.pop("scope_violations", None)
             task.pop("scope_baseline", None)
             task.pop("last_note", None)
-            record(task, "returned", reason=args.reason)
+            return_details = {"reason": args.reason}
+            if changed_tier:
+                return_details.update({
+                    "from_tier": previous_tier,
+                    "to_tier": requested_tier,
+                })
+            record(task, "returned", **return_details)
             save_task(baton_dir, task)
     say("%s returned for attempt %d" % (task["id"], task["attempt"]))
 
@@ -2982,12 +2997,12 @@ def orchestrator_start_brief(baton_dir, tasks, consume_handoff=True):
 
 def orchestrator_plan_brief(tasks):
     say("Task-spec quality checklist:")
-    say("- Choose and announce one explicit configured difficulty before creation.")
-    say("- One clear outcome.")
-    say("- Observable acceptance criteria.")
-    say("- Only needed paths and context.")
-    say("- Exact targeted verification commands.")
-    say("- Explicit permissions for dependencies or sensitive changes.")
+    say("- Prefer direct work for bounded, verifiable goals with no delegation benefit; honor user-requested workers and note overhead.")
+    say("- Before each delegated task, announce one configured tier, reason, and concrete check: easy for specified local edits with deterministic checks; medium for bounded investigation/integration; hard for unresolved architecture or subtle concurrency, security, data-loss, or weak-verification risk.")
+    say("- Judge residual complexity after specification, not lines, files, or parent difficulty; batch cohesive easy work, avoid oversplitting, and isolate genuine uncertainty.")
+    say("- State outcome, acceptance criteria, needed paths/context, verifiable scope/permissions, and falsifiable checks.")
+    say("- Give specific evidence-based retry/reroute reasons; diagnose spec, tooling, or environment failure, make one focused correction, then reassess, not blindly retry.")
+    say("- No quotas, capability assumptions, or automatic model selection/downgrades.")
     say("Queued/blocked graph:")
     graph = [task for task in tasks if task.get("status") in {"queued", "blocked"}]
     for task in graph[:12]:
@@ -3216,6 +3231,34 @@ def working_tree_state(root):
         return None
 
 
+def recorded_launch_tiers(task):
+    """Yield launch entries with explicit or conservatively reconstructed tiers."""
+    history = task.get("history", [])
+    if not isinstance(history, list):
+        return
+    fallback = task.get("tier")
+    for entry in history:
+        if (
+                isinstance(entry, dict)
+                and entry.get("event") == "returned"
+                and "from_tier" in entry and "to_tier" in entry):
+            fallback = entry.get("from_tier")
+            break
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("event") == "launched":
+            yield entry, entry.get("tier") if "tier" in entry else fallback
+        elif (
+                entry.get("event") == "returned"
+                and "from_tier" in entry and "to_tier" in entry):
+            fallback = entry.get("to_tier")
+
+
+def routing_tier_bucket(tier):
+    return tier if isinstance(tier, str) and tier in CONVENTIONAL_LEVELS else "other"
+
+
 def worker_usage_sentence(tasks, for_request=False):
     """Summarize recorded worker launches for a request or the whole runtime."""
     counts = {name: 0 for name in CONVENTIONAL_LEVELS}
@@ -3223,18 +3266,12 @@ def worker_usage_sentence(tasks, for_request=False):
     for task in tasks:
         if not isinstance(task, dict):
             continue
-        history = task.get("history", [])
-        if not isinstance(history, list):
-            continue
-        launches = sum(
-            1 for entry in history
-            if isinstance(entry, dict) and entry.get("event") == "launched"
-        )
-        tier = task.get("tier")
-        if isinstance(tier, str) and tier in counts:
-            counts[tier] += launches
-        else:
-            other += launches
+        for _entry, tier in recorded_launch_tiers(task):
+            bucket = routing_tier_bucket(tier)
+            if bucket == "other":
+                other += 1
+            else:
+                counts[bucket] += 1
 
     total = sum(counts.values()) + other
     if for_request:
@@ -4167,7 +4204,7 @@ def run_wave(args, baton_dir, context):
                     "pid": None, "started_at": now(), "lease": context["lease"],
                 }
                 record(current, "launched", attempt=current.get("attempt", 1),
-                       lease=context["lease"],
+                       tier=current.get("tier"), lease=context["lease"],
                        capsule_chars=prepared_by_id[task["id"]]["capsule_chars"])
                 save_task(baton_dir, current)
 
@@ -4370,17 +4407,81 @@ def request_tasks_by_id(task_ids, active, archived):
     return selected
 
 
+def routing_stats_lines(tasks):
+    """Return bounded per-launch routing evidence without inferring quality."""
+    columns = (
+        "launches", "retry_launches", "needs_review", "failed", "blocked",
+        "accepted_tasks",
+    )
+    counts = {
+        tier: {column: 0 for column in columns}
+        for tier in (*CONVENTIONAL_LEVELS, "other")
+    }
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        launches_by_attempt = {}
+        last_launch_bucket = None
+        for entry, tier in recorded_launch_tiers(task):
+            bucket = routing_tier_bucket(tier)
+            counts[bucket]["launches"] += 1
+            last_launch_bucket = bucket
+            attempt = entry.get("attempt")
+            if (
+                    isinstance(attempt, int) and not isinstance(attempt, bool)
+                    and attempt > 0):
+                launches_by_attempt[attempt] = bucket
+                if attempt > 1:
+                    counts[bucket]["retry_launches"] += 1
+
+        last_exits = {}
+        history = task.get("history", [])
+        if not isinstance(history, list):
+            history = []
+        for entry in history:
+            if not isinstance(entry, dict) or entry.get("event") != "worker_exited":
+                continue
+            attempt = entry.get("attempt")
+            if (
+                    isinstance(attempt, int) and not isinstance(attempt, bool)
+                    and attempt > 0 and attempt in launches_by_attempt):
+                last_exits[attempt] = entry
+        for attempt, entry in last_exits.items():
+            status = entry.get("status")
+            if isinstance(status, str) and status in {"needs_review", "failed", "blocked"}:
+                counts[launches_by_attempt[attempt]][status] += 1
+        if task.get("status") == "done" and last_launch_bucket is not None:
+            counts[last_launch_bucket]["accepted_tasks"] += 1
+
+    lines = [
+        "Routing outcomes (recorded launches; not token or quality measurements):",
+        "Tier | Launches | Retry launches | Needs review | Failed | Blocked | Accepted tasks",
+    ]
+    for tier in (*CONVENTIONAL_LEVELS, "other"):
+        row = counts[tier]
+        lines.append("{} | {} | {} | {} | {} | {} | {}".format(
+            tier, row["launches"], row["retry_launches"], row["needs_review"],
+            row["failed"], row["blocked"], row["accepted_tasks"],
+        ))
+    return lines
+
+
 def cmd_stats(args):
     """Print bounded aggregate runtime evidence without write-capable locks."""
     require_orchestrator()
     baton_dir = require_baton_dir()
     active = load_all_tasks(baton_dir)
     archived = load_archived_tasks(baton_dir)
+    selected = (
+        request_tasks_by_id(args.task_ids, active, archived)
+        if args.task_ids else active + archived
+    )
+    if getattr(args, "routing", False):
+        for line in routing_stats_lines(selected):
+            say(line)
+        return
     if args.task_ids:
-        say(worker_usage_sentence(
-            request_tasks_by_id(args.task_ids, active, archived),
-            for_request=True,
-        ))
+        say(worker_usage_sentence(selected, for_request=True))
         return
     located_tasks = [(task, False) for task in active] + [
         (task, True) for task in archived
@@ -4627,7 +4728,8 @@ def task_problems(
                 problems.append(prefix + "unknown dependency {}".format(dependency))
             elif not known_shapes[dependency]["status"]:
                 problems.append(prefix + "dependency {} has invalid status".format(dependency))
-            elif known_tasks[dependency]["status"] == "cancelled":
+            elif (known_tasks[dependency]["status"] == "cancelled"
+                    and task.get("status") != "cancelled"):
                 problems.append(prefix + "cancelled dependency {}".format(dependency))
     runner = task.get("runner")
     if shape["status"] and task["status"] == "running":
@@ -5727,6 +5829,7 @@ def build_parser():
     command = task_commands.add_parser("return", help="queue another attempt")
     command.add_argument("id")
     command.add_argument("--reason", required=True)
+    command.add_argument("--tier", help="explicit configured tier for the retry")
     command.set_defaults(function=cmd_task_return)
 
     command = task_commands.add_parser("decide", help="answer a worker question")
@@ -5768,7 +5871,11 @@ def build_parser():
     command = commands.add_parser("stats", help="show read-only task statistics")
     command.add_argument(
         "--task", dest="task_ids", action="append", default=[], metavar="ID",
-        help="report worker use for one request task (repeatable)",
+        help="limit request or routing statistics to a task (repeatable)",
+    )
+    command.add_argument(
+        "--routing", action="store_true",
+        help="show recorded routing outcomes without token or quality claims",
     )
     command.set_defaults(function=cmd_stats)
 

@@ -71,11 +71,29 @@ Check these behaviors with temporary Git repositories and stub workers:
     retries, and prints only the copy-ready request-scoped worker breakdown.
     Ordinary `stats` output remains unchanged, and manuals never present the
     runtime-wide close count as a per-request count.
+22. Selection uses direct execution for a small bounded verifiable goal when
+    delegation adds no expected quality/context benefit unless workers were
+    expressly requested. Direct mode avoids live task scopes, makes no worker
+    review/acceptance claim, verifies, and prints the exact zero-worker sentence.
+23. Delegation uses easy-first residual complexity rather than size or tier
+    quotas: coherent cheap work is batched, genuine uncertainty is isolated, and
+    risky or weakly verified reasoning receives stronger routing/review. A
+    settled design can leave easier mechanical implementation.
+24. `task return ID --reason TEXT [--tier NAME]` validates any configured route
+    before mutation, preserves tier when omitted, retains old work/history, and
+    snapshots reroutes. `stats --routing [--task ID]...` reports routing/outcomes
+    read-only without changing original stats text or inferring token use or
+    quality.
 
 Read the local specification and tests when present. Compare every promise in
 the manuals with actual CLI behavior. Keep the shared-working-tree limitation
 explicit: approval records review but does not apply or revert code.
 
-Run the complete test suite after each fix. Your final report must list changed
-files, exact commands and results, remaining limitations, and a clear yes or no
-on readiness.
+For each fix, first exercise a falsifiable regression, run the smallest relevant
+checks, and run broader tests once at integration unless risk requires more. Use
+failed evidence to revise a retry rather than blindly promoting its tier.
+
+Run the complete test suite once at final integration, with additional runs
+only when risk requires them. Your final report must list changed files, exact
+commands and results, remaining limitations, and a clear yes or no on
+readiness.

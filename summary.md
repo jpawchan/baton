@@ -13,6 +13,10 @@ Baton coordinates external worker CLIs. It is not an agent model, package manage
 - The hardening release is commit `eeb6894` (`feat: harden Baton lifecycle and archive durability`) on `main` in `https://github.com/jpawchan/baton`; its GitHub CI passed on Ubuntu and macOS with Python 3.11 and 3.13.
 - The current CLI includes generated dual-edge capsules, phase receipts and one-use gates, strict difficulty tiers, read-only statistics, compaction-aware Claude Code hooks, identity-based bounded handoffs, immutable review evidence, and crash-recoverable archival.
 - The hardening release adds parent-directory durability to atomic writes, serializes accept/archive and close snapshots, publishes retry context before re-queueing, binds result bytes to launch/exit history, hardens report/memory parsing and validation, tracks handoff identities with a version-3 cursor, and uses a durable archive journal plus native atomic no-replace moves.
+- Selective delegation is now an explicit policy: use direct execution for a bounded, verifiable goal without an expected delegation benefit; otherwise assess each child's residual complexity easy-first and use an explicitly configured executable tier. The policy does not infer capability or price from private route labels, and there are no tier quotas or automatic downgrades.
+- `task return ID --reason TEXT [--tier NAME]` supports a deliberate configured-route retry; launch snapshots preserve historical attribution, and read-only `stats --routing [--task ID]...` remains stable when current route configuration changes, without inferring token use or quality.
+- The paired evaluator at `tools/evaluate_delegation.py`, documented in `docs/delegation-evaluation.md`, accepts operator-supplied direct/Baton measurements and independent checks only; it does not run agents or claim quality or end-to-end savings.
+- The current fresh-install activation measurement is 13,975 UTF-8 bytes (3,494 bytes/4 estimated tokens); `tests/test_context_footprint.py` fixes ceilings at 12,000 bytes for the installed manual and 14,500 bytes for total activation. These are footprint guards, not provider-token or performance evidence.
 - The preceding performance commit `28dc3c2` introduced `ScopeOverlapIndex` and one active+archive state load for task creation. Keep that attribution separate from `eeb6894`; both are part of the current implementation.
 - Malformed-input, concurrency, interrupted-publication, result-integrity, and archive crash/race behavior have regression coverage. The performance changes and measured limits are recorded in `docs/performance.md`.
 - Run the end-to-end suite rather than relying on a point-in-time test count. The release passed the full local and independent suites, focused adversarial regressions, context tests, benchmarks, and the four-job GitHub matrix. The expected `[T001-lease-guard] stale finalizer ignored` diagnostic is not a failure. A framework-owned `baton orchestrate` process remains deliberately out of scope.
@@ -25,14 +29,19 @@ Requirements: Python 3.11+, Git on `PATH`, macOS or Linux. No dependency install
 ```bash
 cd <repo-root>
 python3 framework/baton --help
-python3 -m py_compile framework/baton tests/test_baton.py tools/measure_context.py tests/test_context_footprint.py
+python3 -m py_compile framework/baton tests/test_baton.py tools/measure_context.py tests/test_context_footprint.py tools/evaluate_delegation.py tests/test_evaluate_delegation.py tests/test_routing.py
 python3 tests/test_baton.py
 python3 tests/test_context_footprint.py
+python3 tests/test_routing.py
+python3 tests/test_evaluate_delegation.py
+python3 tools/measure_context.py --json
+python3 tools/measure_context.py --json
+env -u BATON_TASK_ID -u BATON_ATTEMPT -u BATON_LEASE -u BATON_DIR -u BATON_ROOT python3 tests/test_baton.py -k memory_archive_and_prompt_spec_alignment
 python3 tools/benchmark_performance.py --repo . --source framework/baton --samples 3 --skip-suite --output /tmp/baton-performance.json
 git diff --check
 ```
 
-Expected: the help usage line includes `stats` and `tiers`; py_compile is silent; both unittest summaries end in `OK`; the benchmark writes JSON with `context`, `benchmarks`, and `hot_paths` results for comparison with `docs/performance.md`; `git diff --check` is silent. The expected `[T001-lease-guard] stale finalizer ignored` probe diagnostic may follow the primary suite (temp Git repos and stub workers, no network or live agent calls).
+Expected: the help usage line includes `stats` and `tiers`; py_compile is silent; all unittest summaries end in `OK`; the two context JSON outputs have identical totals and hashes; the benchmark writes JSON with `context`, `benchmarks`, and `hot_paths` results for comparison with `docs/performance.md`; `git diff --check` is silent. The expected `[T001-lease-guard] stale finalizer ignored` probe diagnostic may follow the primary suite (temp Git repos and stub workers, no network or live agent calls).
 
 The executable-shebang tests invoke `python3` through `#!/usr/bin/env`. If the host's default `python3` is older than 3.11, create a temporary `python3` shim pointing at the interpreter under test and prepend it to `PATH`; do not edit the tracked shebang merely to accommodate the test host.
 
@@ -100,7 +109,11 @@ the only connections to agent CLIs.
 | `docs/performance.md` | Profiling method, benchmark evidence, and rejected optimizations. |
 | `docs/github-description.txt` | Short public repository description. |
 | `tools/` | Context-measurement scripts and the 500-active + 500-archived-task performance fixture, including valid finalized review evidence and 100 Git-visible changes. |
-| `tests/test_context_footprint.py` | Activation-footprint reproducibility checks. |
+| `tools/measure_context.py` | Fresh-install activation artifact measurement, hashes, and offline byte-based estimates. |
+| `tools/evaluate_delegation.py` | Offline validation and verdict arithmetic for operator-supplied paired direct/Baton measurements. |
+| `tests/test_context_footprint.py` | Activation-footprint reproducibility and fixed regression-ceiling checks. |
+| `tests/test_routing.py` | Focused retry-rerouting and read-only routing-statistics regressions. |
+| `tests/test_evaluate_delegation.py` | Paired-evaluator schema, verdict, and CLI regressions. |
 | `README.md` | Public explanation, evidence, requirements, install, usage, and repository map. |
 | `summary.md` | This guide. |
 | `.github/workflows/ci.yml` | Only CI workflow. |
@@ -236,7 +249,7 @@ for all three when permission is omitted. Only explicit choice or that path may
 write project-local routing, and executable commands or wrappers must match
 display metadata. Once all three routes are valid, later starts and compaction
 recovery only state safe settings and remind the user they can change them.
-Every task creation requires an explicit configured tier; `default` is rejected.
+Every task creation requires an explicit configured tier; `default` is rejected. Routing policy is not selected from private model labels, prices, or display metadata: configuration supplies only the validated executable for the explicitly chosen tier.
 
 ## Landmines
 
@@ -280,4 +293,4 @@ Every task creation requires an explicit configured tier; `default` is rejected.
 | Debug an archive crash/collision | `read_archive_transaction` → topology validation → `complete_archive_transaction`/rollback → `atomic_archive_rename_no_replace`; use deterministic boundary probes and search tests for `archive_recovery`, `archive_rollback`, `archive_move_boundary`, and `atomic_archive_rename`. |
 | Debug duplicate/missing handoff completions | Treat `orchestrator-handoff-cursor.json` as canonical; inspect `read_handoff_cursor` and `orchestrator_close_brief`; run same-second, clock-rollback, cursor-drift, overflow, and consumption tests. |
 
-Last updated 2026-08-28; provenance is commits `eeb6894` and `28dc3c2` plus this change, which added the worker standard-input invariant and the never-started timeout advisory.
+Last updated 2026-09-07. This revision builds on baseline `a65c4d5` with selective delegation, retry rerouting, outcome accounting, and measurement tools. Hardening provenance remains `eeb6894` and `28dc3c2`; the baseline also preserves the worker standard-input invariant and never-started timeout advisory.

@@ -9,6 +9,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+INSTALLED_MANUAL_MAX_BYTES = 12_000
+TOTAL_ACTIVATION_MAX_BYTES = 14_500
 SPEC = importlib.util.spec_from_file_location(
     "measure_context", ROOT / "tools" / "measure_context.py"
 )
@@ -53,6 +55,15 @@ class ContextFootprintTests(unittest.TestCase):
         self.assertIn("Which model and reasoning level should Baton use", manual)
         self.assertNotIn("GPT 5.6", manual)
         self.assertNotIn("Claude Opus", manual)
+
+    def test_current_activation_stays_within_fixed_footprint_ceilings(self):
+        result = MEASURE.measure(ROOT)
+        manual_bytes = result["artifacts"]["installed_orchestrator_manual"]["bytes"]
+        total_bytes = result["total"]["bytes"]
+        self.assertGreater(manual_bytes, 0)
+        self.assertGreater(total_bytes, manual_bytes)
+        self.assertLessEqual(manual_bytes, INSTALLED_MANUAL_MAX_BYTES)
+        self.assertLessEqual(total_bytes, TOTAL_ACTIVATION_MAX_BYTES)
 
     def test_default_result_uses_only_reproducible_offline_estimates(self):
         result = MEASURE.measure(ROOT)

@@ -73,6 +73,36 @@ These checks prevent accidental role violations. They are not a security
 sandbox because workers run as the same operating-system user and can edit the
 same files.
 
+## Request selection and routing
+
+After startup/onboarding, the orchestrator chooses direct execution for a small,
+bounded, verifiable goal when delegation has no expected quality or context
+benefit, unless the user expressly requires workers. Direct mode creates no task,
+claims no worker review or acceptance, and must not edit any path covered by a
+live task scope. It still performs the smallest relevant verification and ends
+with exactly `I used 0 workers for this request: 0 on hard, 0 on medium, and 0 on easy.`
+
+Delegated work is assessed easy-first by each child's residual complexity, not
+by a parent request's size. Before launch the orchestrator states one line with
+tier, reason, and a concrete check. Settled methods/interfaces plus strong checks
+favor easy; bounded investigation or integration favors medium; genuinely
+unresolved architecture, high uncertainty or coupling, irreversible, security,
+or concurrency risk, and weak verification favor hard. Line count, multiple
+files, parent complexity, and missing specifications alone do not. Thus many
+deterministic renames can be easy while a small authentication or concurrency
+patch can be hard. Good specifications lower uncertainty, not intrinsic risk.
+
+The orchestrator batches coherent cheap work when shared context and one
+verification pass save handoff overhead, avoids microtasks, and isolates genuine
+uncertainty. Once design settles interfaces, mechanical implementation may use
+an easier configured route; independent strong review is added only where impact
+or residual risk warrants it. There are no tier quotas or assumed model prices
+or capabilities. Route changes use only user-configured executable tiers and
+never rewrite configuration to meet a target. Selection optimizes total
+end-to-end work, including activation, orchestration, workers, review, retries,
+and cached or uncached input/output. No measured token or quality improvement is
+claimed without comparable evidence.
+
 ## Tasks
 
 Task ids use `T###-short-slug`. The CLI assigns them monotonically; callers
@@ -138,10 +168,17 @@ Lifecycle rules:
 6. `task accept --brief TOKEN` changes only `needs_review` to `done`. It refuses
    live workers and unresolved scope violations and, by default, requires a
    fresh review-phase orchestrator brief token bound to the current attempt.
-7. `task return --reason` queues another attempt and appends feedback to the
-   task spec. Scope-violating paths must first match their pre-wave state.
+7. `task return ID --reason TEXT [--tier NAME]` queues another attempt and
+   appends feedback to the task spec before queueing; it never reverts work.
+   Omission preserves the tier. A supplied tier must be configured and resolve
+   to an executable route and is validated before any mutation. A changed route
+   records `from_tier` and `to_tier` on the new `returned` history event without
+   rewriting old history; the next `launched` event snapshots the selected tier.
+   Scope-violating paths must first match their pre-wave state.
 8. `task decide --answer` answers a worker question and queues another attempt.
-9. `task cancel` refuses running and done tasks.
+9. `task cancel` refuses running and done tasks. A cancelled task may retain
+   cancelled prerequisites as historical audit links; validation still rejects
+   cancelled dependencies of non-cancelled tasks.
 10. A missing or invalid worker result becomes `failed` with
     `invalid_worker_output`.
 11. Declared changed paths must match the observed paths in that task's scope;
@@ -203,8 +240,10 @@ on the wave tasks and blocks acceptance. Baton writes those changes to a
 separate `attempt-N.violations.diff`. The paths must be restored to the
 pre-wave tree before the task can be returned. In a shared parallel working
 tree, every worker must declare each exact changed path with repeated
-`--changed PATH` arguments to `task finish`. Baton compares each declaration
-with that task's observed scoped diff. This detects distinct cross-scope writes
+`--changed PATH` arguments to `task finish`. Declare only the net Git-visible
+paths changed in the CURRENT attempt, excluding prior attempts and pre-existing
+dirty work; do not copy `git status` or `git diff HEAD` as the changed-path list.
+Baton compares each declaration with that task's observed scoped diff. This detects distinct cross-scope writes
 and prevents silent attribution, while the orchestrator still compares each
 report with its diff before approval. Shared-tree workers are cooperative, not
 hostile-process sandboxes; concurrent writes to the same claimed file cannot be
@@ -275,9 +314,11 @@ task creation, run, review/accept, and session close. Close is invoked as
   characters, and labeled `worker question:`. A decision recommendation always
   names a real task id, never an overflow marker. Under a dedicated handoff leaf
   lock, start atomically marks the handoff consumed without deleting it.
-- `plan` first requires choosing and announcing one explicit configured
-  difficulty, then prints the remaining task-spec quality checklist and a bounded
-  queued/blocked dependency graph.
+- `plan` reinforces request selection and residual-complexity routing. For each
+  delegated task it requires announcing one explicit configured difficulty with
+  a reason and concrete check, then prints the task-spec quality checklist and a
+  bounded queued/blocked dependency graph. It creates no assessment command or
+  mandatory planning artifact.
 - `run` uses the read-only wave selection logic to print what would run and
   cautions for overlapping scopes or unmet dependencies. Every selected task is
   shown with id, title, difficulty, and safe worker label.
@@ -370,10 +411,13 @@ task creation, run, review/accept, and session close. Close is invoked as
   the user to start a fresh coding-agent session and tell it to read
   `.baton/orchestrator.md`. It does not expose or ask the user to run the internal
   start command. The sentence counts every recorded `launched` history event in
-  active and archived tasks, so retries count as separate worker processes. It
-  states the total, hard/medium/easy counts with
-  correct singular/plural grammar, and an other-level count when any default,
-  custom, missing, or malformed tier value was used. Non-object history entries,
+  active and archived tasks, so retries count as separate worker processes. Each
+  launch is classified from its per-launch tier snapshot. Legacy launches missing
+  snapshots reconstruct from the first later `returned.from_tier` and subsequent
+  `returned.to_tier` values, falling back to the task's current tier only when no
+  reroute exists. Malformed or custom snapshots count as other. It states the
+  total, hard/medium/easy counts with correct singular/plural grammar, and an
+  other-level count when needed. Non-object history entries,
   entries whose event is not exactly `launched`, and non-list histories are
   ignored. The sentence says `for this Baton runtime so far` because state does
   not prove that all launches belong to one user request. It is continuity and
@@ -431,14 +475,31 @@ each id, deduplicates repeated ids in first-seen order, resolves tasks across
 active and archived state, and rejects an unknown id. It then prints exactly one
 copy-ready sentence: `I used N worker(s) for this request: H on hard, M on
 medium, and E on easy.`, adding `and O on other levels` only when needed. Every
-recorded `launched` event counts, so retries are separate workers. Default,
-custom, missing, non-text, and otherwise non-conventional tiers count as other;
-commands, paths, flags, provider internals, history free text, and credentials
-are never printed. No-filter aggregate output is byte-unchanged. The
+recorded `launched` event counts, so retries are separate workers. Each launch is
+classified from its per-launch tier snapshot. Legacy launches missing snapshots
+reconstruct from the first later `returned.from_tier` and subsequent
+`returned.to_tier` values, falling back to the task's current tier only when no
+reroute exists. Malformed or custom snapshots count as other; commands, paths,
+flags, provider internals, history free text, and credentials are never
+printed. No-filter aggregate output is byte-unchanged. The
 orchestrator passes every unique task id created for the completed user request
 and copies the sentence into its final response. When a request created no Baton
 task, it states the explicit zero sentence instead of inventing an id. The
 runtime-wide close sentence is never substituted for this request boundary.
+
+`.baton/baton stats --routing [--task ID]...` is an additional read-only routing
+view; the original no-filter stats output and request-scoped sentence without
+`--routing` remain byte-unchanged. Optional task ids are validated, deduplicated,
+and resolved before output. Its deterministic table has hard, medium, easy, and
+other rows and columns `Launches`, `Retry launches`, `Needs review`, `Failed`,
+`Blocked`, and `Accepted tasks`. Outcomes match a valid attempt to its final
+`worker_exited`; accepted tasks count at their last launch. Launches use their
+snapshot tier. Legacy launches missing snapshots reconstruct from the first
+later `returned.from_tier` and subsequent `returned.to_tier` values, falling back
+to the task's current tier only when no reroute exists. Malformed or custom
+snapshots count as other. The view makes no token or quality inference. Guidance
+requires comparable tasks and cautions about small samples, selection bias, and
+external versus capability failures; it is never used for quota optimization.
 
 `.baton/baton tiers` is orchestrator-only and read-only. It prints one deterministic
 block for each explicitly configured tier in sorted name order. Each
@@ -720,6 +781,12 @@ Commands:
 ```
 
 ## Verification
+
+Task criteria include a falsifiable regression for changed behavior and the
+smallest relevant checks. Broader tests run once at integration unless risk
+requires otherwise. A retry identifies evidence from the failed assumption or
+check and adjusts scope, instructions, design, verification, or a configured
+tier instead of blindly promoting reasoning.
 
 `python3 tests/test_baton.py` must pass. The suite uses temporary Git projects
 and stub workers. It covers:

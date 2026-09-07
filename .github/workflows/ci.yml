@@ -26,6 +26,7 @@ jobs:
           python3 tests/test_routing.py
           python3 tests/test_evaluate_delegation.py
           python3 tests/test_context_footprint.py
+          python3 tests/test_agent_benchmarks.py
           python3 tools/measure_context.py --json > context-1.json
           python3 tools/measure_context.py --json > context-2.json
           cmp context-1.json context-2.json

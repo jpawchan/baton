@@ -47,6 +47,17 @@ Baton gives each worker one focused task in a fresh context. The worker rechecks
 
 Without delegation, details from finished tasks stay in the conversation and are sent with later requests. They take up context and may be billed again. Baton gives each worker a fresh context, then returns only its report and Git diff to the orchestrator. That fresh context can avoid carrying finished-task details into later worker requests, but delegation also adds activation, orchestration, review, retry, and worker input/output work. No fixed token or quality saving follows from the design.
 
+### Paired coding pilot
+
+The [September 2026 live pilot](benchmarks/results/2026-09-07-agent-pilot/README.md)
+ran eight fresh direct/Baton solver trials. All solutions passed the frozen
+functional tests, but no higher quality or consistent token saving was shown.
+On the small case Baton chose direct execution and used 1.6% more tokens in
+aggregate. Both mandatory-delegation runs ended incomplete (quota and timeout)
+after substantially higher observed usage. See the report for exact boundaries,
+per-run evidence, and limitations; this is not a general performance estimate.
+The [opt-in harness](benchmarks/agent_pilot/README.md) supports reproduction.
+
 ### Limitations
 
 The footprint measurement covers only Baton-authored activation artifacts. It
@@ -158,6 +169,7 @@ and cannot establish a result from incomplete measurements.
 | `docs/` | Research, context placement, token measurement, audits, and performance results. |
 | `tests/` | End-to-end and token-footprint tests. |
 | `tools/` | Measurement and benchmark scripts. |
+| `benchmarks/` | Controlled coding fixtures, withheld grader, and measured paired-run evidence. |
 | `skill/` | Portable Baton skill and operating guidance. |
 | `SPEC.md` | Normative behavior and safety contract. |
 | `summary.md` | Code-verified maintainer guide. |

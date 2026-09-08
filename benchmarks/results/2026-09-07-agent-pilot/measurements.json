@@ -1,0 +1,85 @@
+{
+  "pairs": [
+    {
+      "baton": {
+        "critical_checks_passed": true,
+        "elapsed_seconds": 465.56384696300665,
+        "logical_input_tokens": 123197,
+        "output_tokens": 12730,
+        "quality": 1.0,
+        "usage_complete": true
+      },
+      "case_id": "retry_after-1",
+      "direct": {
+        "critical_checks_passed": true,
+        "elapsed_seconds": 622.5179989750031,
+        "logical_input_tokens": 140451,
+        "output_tokens": 16180,
+        "quality": 1.0,
+        "usage_complete": true
+      },
+      "rubric_id": "agent-pilot-v1:retry_after"
+    },
+    {
+      "baton": {
+        "critical_checks_passed": true,
+        "elapsed_seconds": 409.10605162200227,
+        "logical_input_tokens": 118510,
+        "output_tokens": 11087,
+        "quality": 1.0,
+        "usage_complete": true
+      },
+      "case_id": "retry_after-2",
+      "direct": {
+        "critical_checks_passed": true,
+        "elapsed_seconds": 524.7728063399991,
+        "logical_input_tokens": 91249,
+        "output_tokens": 13563,
+        "quality": 1.0,
+        "usage_complete": true
+      },
+      "rubric_id": "agent-pilot-v1:retry_after"
+    },
+    {
+      "baton": {
+        "critical_checks_passed": false,
+        "elapsed_seconds": 740.4308729319964,
+        "logical_input_tokens": 1051233,
+        "output_tokens": 40225,
+        "quality": 1.0,
+        "usage_complete": false
+      },
+      "case_id": "ledger-1",
+      "direct": {
+        "critical_checks_passed": true,
+        "elapsed_seconds": 878.9719529130016,
+        "logical_input_tokens": 228394,
+        "output_tokens": 24971,
+        "quality": 1.0,
+        "usage_complete": true
+      },
+      "rubric_id": "agent-pilot-v1:ledger"
+    },
+    {
+      "baton": {
+        "critical_checks_passed": false,
+        "elapsed_seconds": 1503.0351709779934,
+        "logical_input_tokens": 1388077,
+        "output_tokens": 59033,
+        "quality": 1.0,
+        "usage_complete": false
+      },
+      "case_id": "ledger-2",
+      "direct": {
+        "critical_checks_passed": true,
+        "elapsed_seconds": 1118.5137559860013,
+        "logical_input_tokens": 554724,
+        "output_tokens": 28105,
+        "quality": 1.0,
+        "usage_complete": true
+      },
+      "rubric_id": "agent-pilot-v1:ledger"
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,53 @@
+{
+  "pairs": [
+    {
+      "baton_total_tokens": 135927,
+      "case_id": "retry_after-1",
+      "direct_total_tokens": 156631,
+      "quality_delta": 0.0,
+      "rubric_id": "agent-pilot-v1:retry_after",
+      "token_delta": -20704,
+      "verdict": "noninferior_saving"
+    },
+    {
+      "baton_total_tokens": 129597,
+      "case_id": "retry_after-2",
+      "direct_total_tokens": 104812,
+      "quality_delta": 0.0,
+      "rubric_id": "agent-pilot-v1:retry_after",
+      "token_delta": 24785,
+      "verdict": "no_win"
+    },
+    {
+      "baton_total_tokens": null,
+      "case_id": "ledger-1",
+      "direct_total_tokens": 253365,
+      "quality_delta": 0.0,
+      "rubric_id": "agent-pilot-v1:ledger",
+      "token_delta": null,
+      "verdict": "inconclusive"
+    },
+    {
+      "baton_total_tokens": null,
+      "case_id": "ledger-2",
+      "direct_total_tokens": 582829,
+      "quality_delta": 0.0,
+      "rubric_id": "agent-pilot-v1:ledger",
+      "token_delta": null,
+      "verdict": "inconclusive"
+    }
+  ],
+  "schema_version": 1,
+  "summary": {
+    "pairs": 4,
+    "verdicts": {
+      "inconclusive": 2,
+      "no_win": 1,
+      "noninferior_saving": 1,
+      "quality_gain_only": 0,
+      "quality_gate_failed": 0,
+      "quality_regression": 0,
+      "strict_win": 0
+    }
+  }
+}

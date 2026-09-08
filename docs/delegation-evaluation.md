@@ -5,6 +5,17 @@ that an operator has already collected. It does not run agents, inspect logs,
 verify quality, or independently verify provider accounting. It only validates
 the input and applies transparent rules to each direct/Baton pair.
 
+## Live paired-agent pilot
+
+The separate [opt-in Pi pilot harness](../benchmarks/agent_pilot/README.md) launches
+fresh agents, applies frozen withheld tests, and reconciles recorded session/worker
+usage before producing this evaluator's input. Its [September 2026 results](../benchmarks/results/2026-09-07-agent-pilot/README.md)
+contain eight runs: no strict wins, one equal-quality saving, one no-win, and two
+inconclusive pairs. All code passed the functional rubric; quota and timeout left
+both mandatory-delegation workflows incomplete. These small controlled tasks do
+not establish general superiority. Live runs consume provider quota; CI tests
+only the offline harness and grading/accounting fixtures.
+
 ## Command
 
 ```text

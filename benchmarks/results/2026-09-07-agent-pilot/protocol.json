@@ -1,0 +1,145 @@
+{
+  "boundary": "fresh solver invocation through exit, all child workers and internal review/retries; fixture setup and external grading excluded",
+  "cache": "provider cache not controllable; cached input included in logical totals; no billing inference",
+  "framework_revision": "a7d198f654839e4aaa9090f39b6d6a0c3516aab3",
+  "jobs": [
+    {
+      "arm": "direct",
+      "case": "ledger",
+      "id": "run-001",
+      "initial_commit": "f3356d6cd1d99ae473a558d6d60632e36715cb76",
+      "prompt_sha256": "d9e49895f7d0966b54bf4c1ef536fb1d26429d5f921f3e9ec9e95dc6a1b1bf99",
+      "repeat": 1,
+      "runtime_hashes": {}
+    },
+    {
+      "arm": "baton",
+      "case": "ledger",
+      "id": "run-002",
+      "initial_commit": "f3356d6cd1d99ae473a558d6d60632e36715cb76",
+      "prompt_sha256": "2238b5361be41b9c5a940db38d7cbbb09a3a68e8f4d59b3fa0a477e158147449",
+      "repeat": 1,
+      "runtime_hashes": {
+        "baton": "af40ba19f3d4875c9010723a2b1b4e851a2d6b9749a59b7958ef877b12b1a79b",
+        "config.toml": "234db6ded36d95a8270b397f6b52ccc9bc6d7d10288580891f5d505fd51a20df",
+        "orchestrator.md": "56016cbd12fb9ff43ab53a5fa91338494214542178cef11590937f5a1868b5b6",
+        "worker.md": "a7305bce92c0aec96a15d00b2a8d9cd960c3e652df23e34159fdaf01459145e1"
+      }
+    },
+    {
+      "arm": "baton",
+      "case": "ledger",
+      "id": "run-003",
+      "initial_commit": "f3356d6cd1d99ae473a558d6d60632e36715cb76",
+      "prompt_sha256": "2238b5361be41b9c5a940db38d7cbbb09a3a68e8f4d59b3fa0a477e158147449",
+      "repeat": 2,
+      "runtime_hashes": {
+        "baton": "af40ba19f3d4875c9010723a2b1b4e851a2d6b9749a59b7958ef877b12b1a79b",
+        "config.toml": "234db6ded36d95a8270b397f6b52ccc9bc6d7d10288580891f5d505fd51a20df",
+        "orchestrator.md": "56016cbd12fb9ff43ab53a5fa91338494214542178cef11590937f5a1868b5b6",
+        "worker.md": "a7305bce92c0aec96a15d00b2a8d9cd960c3e652df23e34159fdaf01459145e1"
+      }
+    },
+    {
+      "arm": "direct",
+      "case": "ledger",
+      "id": "run-004",
+      "initial_commit": "f3356d6cd1d99ae473a558d6d60632e36715cb76",
+      "prompt_sha256": "d9e49895f7d0966b54bf4c1ef536fb1d26429d5f921f3e9ec9e95dc6a1b1bf99",
+      "repeat": 2,
+      "runtime_hashes": {}
+    },
+    {
+      "arm": "direct",
+      "case": "retry_after",
+      "id": "run-005",
+      "initial_commit": "344853d0f0d41ee49e1508fdaeb89b4efc52b3f6",
+      "prompt_sha256": "31b749049dca330be1ef9c11eb36392c2128f7f34c185a0e0e0c396b32434027",
+      "repeat": 1,
+      "runtime_hashes": {}
+    },
+    {
+      "arm": "baton",
+      "case": "retry_after",
+      "id": "run-006",
+      "initial_commit": "344853d0f0d41ee49e1508fdaeb89b4efc52b3f6",
+      "prompt_sha256": "0fd97184c00b9dbfe157342d4e37837e37f0fe256a8adefb6ab0cf263f0a2043",
+      "repeat": 1,
+      "runtime_hashes": {
+        "baton": "af40ba19f3d4875c9010723a2b1b4e851a2d6b9749a59b7958ef877b12b1a79b",
+        "config.toml": "234db6ded36d95a8270b397f6b52ccc9bc6d7d10288580891f5d505fd51a20df",
+        "orchestrator.md": "56016cbd12fb9ff43ab53a5fa91338494214542178cef11590937f5a1868b5b6",
+        "worker.md": "a7305bce92c0aec96a15d00b2a8d9cd960c3e652df23e34159fdaf01459145e1"
+      }
+    },
+    {
+      "arm": "baton",
+      "case": "retry_after",
+      "id": "run-007",
+      "initial_commit": "344853d0f0d41ee49e1508fdaeb89b4efc52b3f6",
+      "prompt_sha256": "0fd97184c00b9dbfe157342d4e37837e37f0fe256a8adefb6ab0cf263f0a2043",
+      "repeat": 2,
+      "runtime_hashes": {
+        "baton": "af40ba19f3d4875c9010723a2b1b4e851a2d6b9749a59b7958ef877b12b1a79b",
+        "config.toml": "234db6ded36d95a8270b397f6b52ccc9bc6d7d10288580891f5d505fd51a20df",
+        "orchestrator.md": "56016cbd12fb9ff43ab53a5fa91338494214542178cef11590937f5a1868b5b6",
+        "worker.md": "a7305bce92c0aec96a15d00b2a8d9cd960c3e652df23e34159fdaf01459145e1"
+      }
+    },
+    {
+      "arm": "direct",
+      "case": "retry_after",
+      "id": "run-008",
+      "initial_commit": "344853d0f0d41ee49e1508fdaeb89b4efc52b3f6",
+      "prompt_sha256": "31b749049dca330be1ef9c11eb36392c2128f7f34c185a0e0e0c396b32434027",
+      "repeat": 2,
+      "runtime_hashes": {}
+    }
+  ],
+  "pi": "0.84.4",
+  "platform": "linux",
+  "prepared_at": "2026-09-07T17:49:59.347403+00:00",
+  "python": "3.11.4",
+  "quality_definition": "equal-weight held-out test-group pass fraction; functional proxy, not all code quality",
+  "repeats": 2,
+  "schema_version": 1,
+  "seed": 20260907,
+  "solver": {
+    "effort": "max",
+    "model": "gpt-6-astra",
+    "provider": "openai-codex"
+  },
+  "source_hashes": {
+    "benchmarks/agent_pilot/README.md": "2443d9040d608a424209974a63b08227fd88ceceede49f5d655b867e36e0c0cb",
+    "benchmarks/agent_pilot/cases.py": "a27226a6977d50b1d6b9055794d3cb4dc17a6257a27ec426272170a6a1e7c3f4",
+    "benchmarks/agent_pilot/holdout.py": "629366f58d9910bb0ef562782d63cab37ccd3a0bb8e8406b69bcbfb963af7393",
+    "benchmarks/agent_pilot/reference.py": "029f1d35099b3a503b35d412eea528b944da66e440505c730ce6120b155a0f0a",
+    "benchmarks/agent_pilot/usage.py": "a0db13a167716c4830371648ed87d48a0b2f2bb3f6cf6989ecc954f0910254f4",
+    "framework/baton": "af40ba19f3d4875c9010723a2b1b4e851a2d6b9749a59b7958ef877b12b1a79b",
+    "framework/orchestrator.md": "56016cbd12fb9ff43ab53a5fa91338494214542178cef11590937f5a1868b5b6",
+    "framework/worker.md": "a7305bce92c0aec96a15d00b2a8d9cd960c3e652df23e34159fdaf01459145e1",
+    "prompts/use-framework.md": "27d1a5e8a87d806db9fd8abfcb93c7f81a146773a64197da0125e3c79715abcf",
+    "tests/test_agent_benchmarks.py": "1bbeffa95ee879389bdbf3b9b9db3c4a59854c1ef82c1e42a5aaeb77b961f933",
+    "tools/benchmark_agents.py": "957dffe51dfe71040d30457210cffd2e4b1c4671f3b28d22255b97f5d1f9aecc",
+    "tools/evaluate_delegation.py": "e631dd196514090e8de15f5679f2bf783572b4defd1cfb9d57c795c42770dfc5"
+  },
+  "timeout_seconds": 1500,
+  "worker_config_sha256": "234db6ded36d95a8270b397f6b52ccc9bc6d7d10288580891f5d505fd51a20df",
+  "worker_routes": {
+    "easy": {
+      "effort": "max",
+      "model": "gpt-5.6-luna",
+      "provider": "openai-codex"
+    },
+    "hard": {
+      "effort": "xhigh",
+      "model": "gpt-6-astra",
+      "provider": "openai-codex"
+    },
+    "medium": {
+      "effort": "high",
+      "model": "gpt-5.6-sol",
+      "provider": "openai-codex"
+    }
+  }
+}

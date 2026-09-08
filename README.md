@@ -10,31 +10,6 @@ The orchestrator divides a goal into scoped tasks. It runs non-overlapping work 
 
 Baton works with coding agents such as Hermes Agent, Claude Code, Codex, and OpenCode, using them as orchestrators or workers.
 
-## Choose direct work or delegation
-
-Baton is selective rather than mandatory. Use direct execution for a small,
-bounded, verifiable goal when fresh-worker context, parallelism, independent
-review, or extra residual reasoning is not expected to help. Honor an explicit
-request for workers, but account for the handoff overhead. Delegate when one of
-those benefits is useful, and judge the complete end-to-end work: activation,
-orchestration, workers, review, retries, input, and output.
-
-Choose each delegated task's tier from its residual complexity after the task is
-specified, not from the size of the parent request:
-
-- **easy:** a settled local edit, such as a documented API rename with a
-deterministic focused test;
-- **medium:** bounded investigation or integration, such as tracing a
-configuration handoff and wiring an already-defined interface;
-- **hard:** unresolved architecture or high-risk uncertainty, such as a
-concurrency, security, or data-loss change with weak verification.
-
-Line count, file count, and a missing specification alone do not justify a harder
-tier. Batch cohesive mechanical work instead of creating microtasks, and
-isolate genuine uncertainty. There are no tier quotas, automatic downgrades, or
-assumed model-price/capability claims. Baton uses only configured executable
-routes and does not rewrite configuration to hit a target.
-
 ## Quality and token use
 
 ### Quality
@@ -45,27 +20,7 @@ Baton gives each worker one focused task in a fresh context. The worker rechecks
 
 ### Token use
 
-Without delegation, details from finished tasks stay in the conversation and are sent with later requests. They take up context and may be billed again. Baton gives each worker a fresh context, then returns only its report and Git diff to the orchestrator. That fresh context can avoid carrying finished-task details into later worker requests, but delegation also adds activation, orchestration, review, retry, and worker input/output work. No fixed token or quality saving follows from the design.
-
-### Paired coding pilot
-
-The [September 2026 live pilot](benchmarks/results/2026-09-07-agent-pilot/README.md)
-ran eight fresh direct/Baton solver trials. All solutions passed the frozen
-functional tests, but no higher quality or consistent token saving was shown.
-On the small case Baton chose direct execution and used 1.6% more tokens in
-aggregate. Both mandatory-delegation runs ended incomplete (quota and timeout)
-after substantially higher observed usage. See the report for exact boundaries,
-per-run evidence, and limitations; this is not a general performance estimate.
-The [opt-in harness](benchmarks/agent_pilot/README.md) supports reproduction.
-
-### Limitations
-
-The footprint measurement covers only Baton-authored activation artifacts. It
-excludes the host system prompt, tool schemas, provider framing, unrelated
-messages, workers, and later task capsules. Its bytes/4 value is an offline
-estimate, not provider-reported usage; it does not measure produced-code quality,
-latency, or end-to-end performance. Workers use external CLIs in a shared
-worktree, so Baton is not a sandbox.
+Without delegation, details from finished tasks stay in the conversation and are sent with later requests. They take up context and may be billed again. Baton gives each worker a fresh context, then returns only its report and Git diff to the orchestrator.
 
 ### Why not just summarize?
 
@@ -106,15 +61,9 @@ Requirements: Python 3.11+, Git on `PATH`, macOS or Linux, and a Git worktree wi
 
 Use any agent with file and command access as the orchestrator, and any agent that accepts CLI prompts as a worker.
 
-### Measured activation footprint
+### Framework token usage
 
-For this checkout, the reproducible activation boundary is 13,975 UTF-8 bytes:
-the activation instructions, installed orchestrator manual, and configured start
-brief before the first coding goal. The standard-library bytes/4 heuristic is
-3,494 estimated tokens, with a broad 2,330–6,988 range. These are estimates, not
-provider-reported usage or a claim about end-to-end savings. See [Activation
-context footprint](docs/context-footprint.md) for the exact artifact hashes,
-reproduction command, baseline comparison, and limitations.
+Baton currently adds about 4,658 tokens before the first task. The estimate covers its activation prompt, orchestrator manual, and configured start brief.
 
 ## Install
 
@@ -135,31 +84,6 @@ framework/baton init /path/to/project
 1. Tell the main coding agent to read `.baton/orchestrator.md`.
 2. Describe your goal.
 
-### Deliberate retries and routing evidence
-
-When review evidence shows that a retry needs a different reasoning route, reroute
-it deliberately rather than promoting it automatically:
-
-```bash
-.baton/baton task return TASK-ID --reason "specific evidence and next check" --tier medium
-```
-
-`--tier` is optional; omitting it preserves the current tier. The selected tier
-must already be configured and executable, and invalid routes are rejected
-before retry state changes. Use the read-only routing view for launch and outcome
-accounting:
-
-```bash
-.baton/baton stats --routing
-.baton/baton stats --routing --task TASK-ID
-```
-
-This view reports recorded launches, retries, and lifecycle outcomes by tier; it
-makes no token or quality inference. For paired direct/Baton measurements, use
-the [paired delegation evaluator](docs/delegation-evaluation.md). It consumes
-operator-supplied usage and independent quality evidence, does not run agents,
-and cannot establish a result from incomplete measurements.
-
 ## Repository contents
 
 | Path | Contents |
@@ -169,7 +93,6 @@ and cannot establish a result from incomplete measurements.
 | `docs/` | Research, context placement, token measurement, audits, and performance results. |
 | `tests/` | End-to-end and token-footprint tests. |
 | `tools/` | Measurement and benchmark scripts. |
-| `benchmarks/` | Controlled coding fixtures, withheld grader, and measured paired-run evidence. |
 | `skill/` | Portable Baton skill and operating guidance. |
 | `SPEC.md` | Normative behavior and safety contract. |
 | `summary.md` | Code-verified maintainer guide. |
@@ -179,17 +102,17 @@ and cannot establish a result from incomplete measurements.
 
 Hermes, claude code, codex, gpt 5.6 sol, fable 5
 
-## Future work
+## Soon
 
-- OKF;
-- Comparative measurements across harnesses, models, and reasoning efforts,
-  using complete accounting and independent quality checks;
-- Additional orchestration strategies, only where reproducible evaluation
-  justifies them;
-- Further context-management experiments.
+OKF;
 
-No quality, token, or delivery improvement is promised without comparable
-external evidence.
+Benchmarks with different harnesses, models and reasoning efforts;
+
+More orchestration strategies to increase quality and reduce token consumption;
+
+Improved context management techniques;
+
+Smarter task difficulty evaluation.
 
 ## License
 

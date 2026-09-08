@@ -119,6 +119,11 @@ python3.11 tools/evaluate_delegation.py \
   benchmarks/results/2026-09-07-agent-pilot/measurements.json --json
 ```
 
+A post-run CI check exposed a macOS temporary-path alias issue in the frozen
+atomic-publication check. [Canonicalizing `TMPDIR`](../../README.md#temporary-directory-portability)
+fixes setup without changing frozen source hashes, grading rules or the measured
+Linux results; a symlink-root reproduction confirmed the issue and remedy.
+
 Raw session/worker transcripts, full project trees, Git patches, and grader
 stdout/stderr are retained privately by the operator. Public ledgers contain no
 prompt/tool-result text or credentials. Public Python snapshots reproduce the

@@ -21,6 +21,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: |
+          # Preserve the frozen grader while avoiding macOS /var -> /private/var aliases.
+          export TMPDIR="$(python3 -c 'from pathlib import Path; import tempfile; print(Path(tempfile.gettempdir()).resolve())')"
           python3 -m py_compile framework/baton tests/test_baton.py tests/test_routing.py tools/measure_context.py tests/test_context_footprint.py tools/evaluate_delegation.py tests/test_evaluate_delegation.py
           python3 tests/test_baton.py
           python3 tests/test_routing.py

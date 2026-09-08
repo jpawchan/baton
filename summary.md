@@ -4,23 +4,40 @@
 
 Baton is a standard-library Python CLI for delegating scoped coding tasks to separate agent processes. One orchestrator creates tasks, runs dependency-ready workers in parallel waves, and reviews each report and Git diff.
 
-A generated Critical Context Capsule appears at both edges of every worker prompt; action-time briefs gate `task finish` and `task accept` with one-use tokens; orchestrator sessions receive phase briefs and a bounded state handoff; and optional Claude Code hooks restore current state after compaction. The design is grounded, with explicit limits, in `docs/research-synthesis.md` and `docs/context-placement.md`; its revision-specific activation cost and direct-execution break-even are measured in `docs/context-footprint.md`.
+A generated Critical Context Capsule appears at both edges of every worker prompt; action-time briefs gate `task finish` and `task accept` with one-use tokens; orchestrator sessions receive phase briefs and a bounded state handoff; and optional Claude Code hooks restore current state after compaction. The design is grounded, with explicit limits, in `docs/research-synthesis.md` and `docs/context-placement.md`. `docs/context-footprint.md` measures revision-specific activation bytes and gives estimate-based break-even guidance, not provider-token or code-quality evidence. The separate paired coding pilot below measures real agent executions.
 
 Baton coordinates external worker CLIs. It is not an agent model, package manager, patch queue, or security sandbox.
 
 ## Current state
 
-- The hardening release is commit `eeb6894` (`feat: harden Baton lifecycle and archive durability`) on `main` in `https://github.com/jpawchan/baton`; its GitHub CI passed on Ubuntu and macOS with Python 3.11 and 3.13.
+- The selective-delegation/runtime update is `a7d198f` (PR #2); the subsequent benchmark/tooling publication is `2ca3e74` (PR #3) on `main` in `https://github.com/jpawchan/baton`. The benchmark addition did not change `framework/baton` or production safety gates. Post-merge CI for `2ca3e74` passed on Ubuntu and macOS with Python 3.11 and 3.13.
+- The earlier hardening release is `eeb6894` (`feat: harden Baton lifecycle and archive durability`); retain its historical attribution rather than treating it as the latest release.
 - The current CLI includes generated dual-edge capsules, phase receipts and one-use gates, strict difficulty tiers, read-only statistics, compaction-aware Claude Code hooks, identity-based bounded handoffs, immutable review evidence, and crash-recoverable archival.
 - The hardening release adds parent-directory durability to atomic writes, serializes accept/archive and close snapshots, publishes retry context before re-queueing, binds result bytes to launch/exit history, hardens report/memory parsing and validation, tracks handoff identities with a version-3 cursor, and uses a durable archive journal plus native atomic no-replace moves.
 - Selective delegation is now an explicit policy: use direct execution for a bounded, verifiable goal without an expected delegation benefit; otherwise assess each child's residual complexity easy-first and use an explicitly configured executable tier. The policy does not infer capability or price from private route labels, and there are no tier quotas or automatic downgrades.
 - `task return ID --reason TEXT [--tier NAME]` supports a deliberate configured-route retry; launch snapshots preserve historical attribution, and read-only `stats --routing [--task ID]...` remains stable when current route configuration changes, without inferring token use or quality.
-- The paired evaluator at `tools/evaluate_delegation.py`, documented in `docs/delegation-evaluation.md`, accepts operator-supplied direct/Baton measurements and independent checks only; it does not run agents or claim quality or end-to-end savings.
+- The paired evaluator at `tools/evaluate_delegation.py`, documented in `docs/delegation-evaluation.md`, accepts operator-supplied direct/Baton measurements and independent checks only; it does not run agents or independently verify their evidence.
+- The separate `tools/benchmark_agents.py` harness provides offline preparation, explicit opt-in live Pi execution, and publication of paired measurements. Frozen fixtures, an external functional grader, session/stream accounting, public solution snapshots, and the measured pilot are under `benchmarks/`.
+- Dependency validation permits a cancelled dependant to retain a cancelled prerequisite, but rejects a non-cancelled dependant with a cancelled prerequisite.
 - The current fresh-install activation measurement is 13,975 UTF-8 bytes (3,494 bytes/4 estimated tokens); `tests/test_context_footprint.py` fixes ceilings at 12,000 bytes for the installed manual and 14,500 bytes for total activation. These are footprint guards, not provider-token or performance evidence.
 - The preceding performance commit `28dc3c2` introduced `ScopeOverlapIndex` and one active+archive state load for task creation. Keep that attribution separate from `eeb6894`; both are part of the current implementation.
 - Malformed-input, concurrency, interrupted-publication, result-integrity, and archive crash/race behavior have regression coverage. The performance changes and measured limits are recorded in `docs/performance.md`.
-- Run the end-to-end suite rather than relying on a point-in-time test count. The release passed the full local and independent suites, focused adversarial regressions, context tests, benchmarks, and the four-job GitHub matrix. The expected `[T001-lease-guard] stale finalizer ignored` diagnostic is not a failure. A framework-owned `baton orchestrate` process remains deliberately out of scope.
+- The benchmark publication passed 259 local offline tests: 228 core, 8 routing, 10 evaluator, 5 context, and 8 pilot-harness checks. CI runs these offline suites and reproducible context measurements, never paid agent trials. Rerun the relevant suites rather than treating that count as a permanent guarantee. The expected `[T001-lease-guard] stale finalizer ignored` diagnostic is not a failure. A framework-owned `baton orchestrate` process remains deliberately out of scope.
 - The repository's live, Git-ignored `.baton/` directory is dogfooding state and audit history, not project source; do not edit or delete it casually.
+
+## Paired coding pilot: 7–8 September 2026
+
+The [published report](benchmarks/results/2026-09-07-agent-pilot/README.md) covers **8 fresh solver runs / 4 pairs**: two controlled synthetic coding cases, two repetitions, direct and Baton arms. Both top-level solvers used Astra/max through Pi; configured worker routes were Astra/xhigh, Sol/high, and Luna/max. These are experiment settings, not routing defaults.
+
+- Every solution passed the frozen functional checks: 14/14 for Retry-After and 21/21 for Ledger. This is an acceptance-test proxy, not proof of general quality, maintainability, or security.
+- For Retry-After, Baton chose direct execution in both repetitions. Its aggregate logical tokens were **265,524 versus 261,443 direct (+1.6%)**; one pair saved tokens and the other did not. Observed summed wall time was 23.8% lower, but two repetitions do not establish a general speed advantage.
+- Ledger explicitly required delegation. Baton recorded **2,538,568 tokens versus 836,194 direct (3.04× observed usage)**, but quota and timeout left both review/acceptance workflows incomplete. Complete Baton totals remain unknown; these pairs are inconclusive, not savings or evidence that harder routing was needed.
+- The unchanged evaluator reports **0 strict wins, 1 noninferior saving, 1 no-win, and 2 inconclusive pairs**. The pilot demonstrates neither higher functional quality nor consistent logical-token savings.
+- The measured solver trees contain **201 response records / 3,901,729 observed logical tokens**, including orchestrators, workers, internal reviews and retries, with cached input counted fully. A separate publication audit used **22 responses / 1,324,916 additional logical tokens**, disclosed outside both measured arms. Construction/reporting are also outside the paired boundary; no request-wide savings or billing claim follows.
+
+The protocol was frozen before execution at `4ddb31f`, against framework `a7d198f`. `protocol.json`, `results.json`, `measurements.json`, `evaluation.json`, `publication-audit.json`, and Python snapshots under the report directory preserve the public evidence. Raw transcripts remain private; hashes support local reconciliation, not independent authentication of unavailable provider records. Keep the original incomplete outcomes and frozen sources; changed budgets, routing or rubrics require a new experiment.
+
+See [pilot design and commands](benchmarks/agent_pilot/README.md) and [temporary-directory portability](benchmarks/README.md). `prepare` creates fixtures/protocol without provider calls; `run` invokes live agents and consumes quota; `summarize` publishes transcript-free ledgers and Python snapshots. Existing/interrupted runs are not silently overwritten. Provider/grader errors stop the batch for inspection. Isolation is cooperative, not an OS sandbox.
 
 ## Run and verify
 
@@ -28,12 +45,16 @@ Requirements: Python 3.11+, Git on `PATH`, macOS or Linux. No dependency install
 
 ```bash
 cd <repo-root>
+export TMPDIR="$(python3 -c 'from pathlib import Path; import tempfile; print(Path(tempfile.gettempdir()).resolve())')"
 python3 framework/baton --help
-python3 -m py_compile framework/baton tests/test_baton.py tools/measure_context.py tests/test_context_footprint.py tools/evaluate_delegation.py tests/test_evaluate_delegation.py tests/test_routing.py
+python3 tools/benchmark_agents.py --help
+python3 -m py_compile framework/baton tests/test_baton.py tools/measure_context.py tests/test_context_footprint.py tools/evaluate_delegation.py tests/test_evaluate_delegation.py tests/test_routing.py tools/benchmark_agents.py tests/test_agent_benchmarks.py benchmarks/agent_pilot/*.py
 python3 tests/test_baton.py
 python3 tests/test_context_footprint.py
 python3 tests/test_routing.py
 python3 tests/test_evaluate_delegation.py
+python3 tests/test_agent_benchmarks.py
+python3 tools/evaluate_delegation.py benchmarks/results/2026-09-07-agent-pilot/measurements.json --json
 python3 tools/measure_context.py --json
 python3 tools/measure_context.py --json
 env -u BATON_TASK_ID -u BATON_ATTEMPT -u BATON_LEASE -u BATON_DIR -u BATON_ROOT python3 tests/test_baton.py -k memory_archive_and_prompt_spec_alignment
@@ -42,6 +63,10 @@ git diff --check
 ```
 
 Expected: the help usage line includes `stats` and `tiers`; py_compile is silent; all unittest summaries end in `OK`; the two context JSON outputs have identical totals and hashes; the benchmark writes JSON with `context`, `benchmarks`, and `hot_paths` results for comparison with `docs/performance.md`; `git diff --check` is silent. The expected `[T001-lease-guard] stale finalizer ignored` probe diagnostic may follow the primary suite (temp Git repos and stub workers, no network or live agent calls).
+
+The pilot harness tests are offline: they exercise accounting, frozen-fixture preparation, and answer-key/grader sanity checks without provider calls. Evaluating the published measurements must reproduce the four verdicts above. Do not add a live `benchmark_agents.py run` invocation to routine verification or CI.
+
+Canonical `TMPDIR` is necessary for the frozen v1 atomic-publication check on aliased temporary roots (notably macOS `/var` versus `/private/var`). The check resolves the candidate file path but not the comparison root. CI canonicalizes the environment rather than rewriting frozen grader hashes; the original Linux `/tmp` results are unchanged. Future grader versions should normalize both operands.
 
 The executable-shebang tests invoke `python3` through `#!/usr/bin/env`. If the host's default `python3` is older than 3.11, create a temporary `python3` shim pointing at the interpreter under test and prepend it to `PATH`; do not edit the tracked shebang merely to accommodate the test host.
 
@@ -81,12 +106,11 @@ Do not smoke-test a real worker unless the configured worker CLI and its credent
 | Processes | `subprocess.Popen(..., start_new_session=True)`; process-group signalling on timeout/interrupt. |
 | Configuration | TOML via `tomllib`; runtime state is JSON records plus Markdown specs/reports/briefs/handoff. |
 | Version control | Git CLI snapshots with a temporary `GIT_INDEX_FILE`; no Git library. |
-| Tests | `unittest` end-to-end cases in `tests/test_baton.py` with temp repos and embedded stub workers. |
-| CI | `.github/workflows/ci.yml`: push+PR, Ubuntu/macOS × Python 3.11/3.13, `checkout@v7`, `setup-python@v6`, 10-minute timeout. |
+| Tests | Standard-library `unittest`: temp-repo/stub-worker end-to-end tests plus routing, context, evaluator, and offline pilot-harness suites. |
+| CI | `.github/workflows/ci.yml`: push+PR, Ubuntu/macOS × Python 3.11/3.13, `checkout@v7`, `setup-python@v6`, canonical `TMPDIR`, offline suites only, 10-minute timeout. |
 | License | MIT (`LICENSE`). |
 
-Baton itself makes no HTTP requests. Explicit project-local tier commands are
-the only connections to agent CLIs.
+`framework/baton` makes no HTTP requests; its worker launches use explicit project-local tier commands. The separate opt-in pilot harness also starts fresh Pi solver processes. That experiment is not a new production orchestrator command or a change to routing defaults.
 
 ## Repository map
 
@@ -106,14 +130,20 @@ the only connections to agent CLIs.
 | `docs/context-placement.md` | Research rationale, linked sources, rejected alternatives, limits, and experiment requirements for capsule edge placement. |
 | `docs/research-synthesis.md` | Primary-source-grounded long-context synthesis, claim mapping, and limits. |
 | `docs/context-footprint.md` | Reproducible activation footprint, provider differentials, and break-even guidance. |
-| `docs/performance.md` | Profiling method, benchmark evidence, and rejected optimizations. |
+| `docs/performance.md` | Profiling method, runtime microbenchmark evidence, and rejected optimizations. |
+| `docs/delegation-evaluation.md` | Paired-measurement schema, conservative verdict rules, boundaries, and links to live-pilot evidence. |
 | `docs/github-description.txt` | Short public repository description. |
-| `tools/` | Context-measurement scripts and the 500-active + 500-archived-task performance fixture, including valid finalized review evidence and 100 Git-visible changes. |
+| `tools/` | Context measurement, the 500-active + 500-archived runtime-performance fixture, offline paired evaluation, and explicitly opt-in live-agent benchmarking. |
 | `tools/measure_context.py` | Fresh-install activation artifact measurement, hashes, and offline byte-based estimates. |
 | `tools/evaluate_delegation.py` | Offline validation and verdict arithmetic for operator-supplied paired direct/Baton measurements. |
+| `tools/benchmark_agents.py` | Pi pilot `prepare` / `run` / `summarize`: frozen inputs, serial solver runs, bounded shutdown, workflow/usage checks, and publication. |
+| `benchmarks/README.md` | Benchmark index, canonical-temp-root setup, and frozen-grader portability caveat. |
+| `benchmarks/agent_pilot/` | Frozen task contracts/starters (`cases.py`), withheld functional grader (`holdout.py`), offline answer keys (`reference.py`), Pi accounting (`usage.py`), and protocol documentation. |
+| `benchmarks/results/2026-09-07-agent-pilot/` | Measured report, frozen protocol, completion/quality records, per-call token ledgers, evaluator input/output, separate audit accounting, and generated Python snapshots; no raw transcripts. |
 | `tests/test_context_footprint.py` | Activation-footprint reproducibility and fixed regression-ceiling checks. |
 | `tests/test_routing.py` | Focused retry-rerouting and read-only routing-statistics regressions. |
 | `tests/test_evaluate_delegation.py` | Paired-evaluator schema, verdict, and CLI regressions. |
+| `tests/test_agent_benchmarks.py` | Eight offline pilot checks: session/stream accounting, incomplete evidence, frozen/balanced preparation, and starting-code/answer-key grading. |
 | `README.md` | Public explanation, evidence, requirements, install, usage, and repository map. |
 | `summary.md` | This guide. |
 | `.github/workflows/ci.yml` | Only CI workflow. |
@@ -134,7 +164,7 @@ the only connections to agent CLIs.
 | Git snapshots and scopes | `git_snapshot`, `git_changed_paths`, `git_tree_diff`, `normalize_scope`, `scopes_overlap`, `ScopeOverlapIndex`, and `path_in_scopes`. |
 | Worker launch and waves | `WORKER_PROMPT`, `build_prompt`, `prepare_worker`, `run_one_worker`, `worker_left_no_evidence`, indexed `pick_wave`, `finalize_task` (stable result digest, lifecycle record, and cardinality-preserving changed-path attribution), `cmd_run`, `run_wave`. |
 | Validation and transactional archive | `task_problems`, `archive_layout_problems`, strict journal builders/readers/topology checks, `atomic_archive_rename_no_replace`, transaction completion/recovery/rollback, `cmd_validate`, and `cmd_archive`. |
-| Tiers, stats, memory, CLI | Read-only `cmd_tiers`/`cmd_stats`; strict `memory_index_entries` + `memory_records` index/body parity; `cmd_memory_*`, `cmd_init`, `build_parser`, `main`. |
+| Tiers, stats, memory, CLI | Read-only `cmd_tiers`/`cmd_stats`; `recorded_launch_tiers`, `routing_stats_lines`, and `worker_usage_sentence` preserve launch/retry attribution; strict `memory_index_entries` + `memory_records` index/body parity; `cmd_memory_*`, `cmd_init`, `build_parser`, `main`. |
 
 ## How it works
 
@@ -219,7 +249,7 @@ Efficient future-debugging sequence:
 1. Reproduce in a temporary initialized Git project; preserve task JSON, result/report/diff bytes, handoff/cursor or archive journal, and source/destination existence before changing code.
 2. Run the narrow unittest by name or `-k` substring. For archive crash/race work, use `archive_transaction_boundary` and `archive_atomic_rename_boundary` instead of timing sleeps.
 3. Check transition and lock ordering before adding validation: scheduler before task/handoff; retry publication before re-queue; handoff cursor before Markdown; fsynced archive journal before moves.
-4. After a focused fix, run compile, the full primary/context suites, `git diff --check`, and the real benchmark. Cross-platform archive changes require Linux and macOS CI.
+4. After a focused fix, run compile, appropriate regression suites, `git diff --check`, and the relevant offline runtime-performance fixture. Cross-platform archive changes require Linux and macOS CI. Live agent trials are separate, quota-consuming experiments, never an automatic debugging step.
 
 ## Configuration
 
@@ -253,6 +283,7 @@ Every task creation requires an explicit configured tier; `default` is rejected.
 
 ## Landmines
 
+- Do not revise the original pilot's frozen hashes, rubric, quota/timeout outcomes, or interrupted directories to obtain a favorable comparison. Start a new frozen experiment for changed policy; keep raw transcripts private and incomplete usage inconclusive. Use canonical `TMPDIR` for the v1 grader's path-alias limitation.
 - `SPEC.md` is normative and embedded byte-identically in `prompts/create-framework.md` between `BEGIN SPEC`/`END SPEC`; a test fails on drift. Change SPEC → regenerate the embedded copy in the same change.
 - The capsule is always GENERATED from the spec's existing sections (`Objective`, `Acceptance criteria`, `Not allowed`, `Verification`, latest feedback/decision) plus summaries for up to six worker-visible memory ids referenced only in `Context`. Never add a hand-edited capsule section, copy full memory bodies, or duplicate criteria; the stored launch capsule is the immutable audit snapshot and review warns on input drift.
 - Template-placeholder specs refuse to launch and fail `validate`. Test fixtures must write real Objective/Acceptance criteria before `run`.
@@ -264,7 +295,7 @@ Every task creation requires an explicit configured tier; `default` is rejected.
 - Retry safety is publication-before-state: `return` and `decide` publish and re-read an exact section-bound unfenced proof before incrementing the attempt and re-queueing. If publication fails, the task must remain non-runnable.
 - Result raw bytes become digest-bound at finalization; report, result, diff, and launch capsule become jointly bound when the review brief issues its manifest. A changed digest, forged lifecycle, changed manifest, symlink, malformed schema, or declared/observed path mismatch must block validate/review/accept without consuming a valid review token; issue a new review brief after any legitimate evidence change.
 - `atomic_write` durability depends on the parent-directory fsync after `os.replace`; do not downgrade parent-sync failure to a warning or replace managed writes with direct `write_text`/plain JSON output.
-- Changed-path attribution intentionally checks cardinality before comparing case-folded sets. Removing the length check allows differently cased paths to collapse and pass falsely.
+- Changed-path attribution intentionally checks cardinality before comparing case-folded sets. Removing the length check allows differently cased paths to collapse and pass falsely. Workers declare only current-attempt net changed paths, excluding pre-existing dirty work and earlier attempts; `return` never reverts those earlier changes.
 - Report and retry-heading parsing must reuse the CommonMark-aware fence rules. Ad hoc heading regexes reopen fenced-heading and mismatched-fence bugs.
 - Memory edits must pass `memory_records` index/body parity and structural validation before mutation. Do not split on raw `## Entries` substrings or permit duplicate/orphan full-entry headings.
 - At request completion, pass every unique task id created for that request to repeatable `stats --task ID`; copy its single sentence into the final response. It counts retries and classifies legacy default/custom/malformed tier state as `other levels`. If no task was created, state the explicit zero breakdown. Close still reports all runtime launches for continuity, but that fallback may span requests and must never be relabeled as request-scoped.
@@ -292,5 +323,7 @@ Every task creation requires an explicit configured tier; `default` is rejected.
 | Add a field to `.baton/baton stats` output | `cmd_stats` + `stats_count_lines` in `framework/baton` (receipts via `read_phase_receipts`); SPEC.md stats sentences + embedded copy; stats fixture tests in `tests/test_baton.py`. |
 | Debug an archive crash/collision | `read_archive_transaction` → topology validation → `complete_archive_transaction`/rollback → `atomic_archive_rename_no_replace`; use deterministic boundary probes and search tests for `archive_recovery`, `archive_rollback`, `archive_move_boundary`, and `atomic_archive_rename`. |
 | Debug duplicate/missing handoff completions | Treat `orchestrator-handoff-cursor.json` as canonical; inspect `read_handoff_cursor` and `orchestrator_close_brief`; run same-second, clock-rollback, cursor-drift, overflow, and consumption tests. |
+| Audit paired usage or a claimed efficiency win | `benchmarks/agent_pilot/usage.py`, per-call/completion records in the published `results.json`, and `tools/evaluate_delegation.py`; run offline harness/evaluator tests, not new agents. |
+| Reproduce or extend the coding pilot | `benchmarks/README.md` → `benchmarks/agent_pilot/README.md` → `tools/benchmark_agents.py`; preserve the original `4ddb31f` protocol and use a new frozen experiment for changes. |
 
-Last updated 2026-09-07. This revision builds on baseline `a65c4d5` with selective delegation, retry rerouting, outcome accounting, and measurement tools. Hardening provenance remains `eeb6894` and `28dc3c2`; the baseline also preserves the worker standard-input invariant and never-started timeout advisory.
+Last updated 2026-09-08, reviewed against `2ca3e74` (paired benchmark publication) and `a7d198f` (selective delegation, retry rerouting, and routing outcomes). Hardening provenance remains `eeb6894` and `28dc3c2`; the worker standard-input invariant and never-started timeout advisory remain unchanged. The live pilot added tooling/evidence, not a production runtime or safety-gate modification.
